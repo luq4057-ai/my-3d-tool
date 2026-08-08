@@ -34,9 +34,35 @@ def init_db():
     conn.close()
 
 
+def ensure_dependencies():
+    """确保爬虫所需的依赖库已安装"""
+    required_modules = ['requests', 'bs4', 'schedule', 'urllib3']
+    missing_modules = []
+    
+    for module in required_modules:
+        try:
+            __import__(module)
+        except ImportError:
+            missing_modules.append(module)
+    
+    if missing_modules:
+        with st.spinner(f"📦 正在安装依赖库：{', '.join(missing_modules)}..."):
+            subprocess.run(
+                ["pip", "install", "-r", "requirements.txt"],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+        return True
+    return False
+
+
 def run_full_scrape():
     """运行全量爬虫"""
     try:
+        # 先确保依赖已安装
+        ensure_dependencies()
+        
         scraper_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scraper_3d.py")
         with st.spinner("🕷️ 正在从官网抓取历史数据，请稍候..."):
             result = subprocess.run(
