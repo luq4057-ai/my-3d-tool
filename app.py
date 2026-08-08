@@ -127,19 +127,18 @@ def parse_page(html):
 def load_records():
     """智能加载数据：优先本地数据库，失败则从官网抓取"""
     # 方案1：尝试从本地数据库读取
-    if os.path.exists(DB_FILE):
-        try:
-            conn = sqlite3.connect(DB_FILE)
-            df = pd.read_sql_query(
-                f"SELECT period, num1, num2, num3, pattern, draw_date "
-                f"FROM {TABLE_NAME} ORDER BY period ASC",
-                conn,
-            )
-            conn.close()
-            if not df.empty:
-                return df
-        except Exception:
-            pass
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        df = pd.read_sql_query(
+            f"SELECT period, num1, num2, num3, pattern, draw_date "
+            f"FROM {TABLE_NAME} ORDER BY period ASC",
+            conn,
+        )
+        conn.close()
+        if not df.empty:
+            return df
+    except Exception:
+        pass
     
     # 方案2：从官网实时抓取
     try:
