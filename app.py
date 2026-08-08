@@ -5,6 +5,7 @@ from math import comb
 from datetime import datetime, timedelta
 import re
 import time
+import os
 
 import requests
 from bs4 import BeautifulSoup
