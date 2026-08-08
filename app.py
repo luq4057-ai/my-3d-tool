@@ -14,6 +14,48 @@ MULTIPLIERS = {5: 15.0, 6: 7.5, 7: 4.3}
 st.set_page_config(page_title="福彩3D 智能分析", layout="wide")
 
 
+def init_db():
+    """初始化数据库表结构"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+            period    TEXT PRIMARY KEY,
+            num1      INTEGER NOT NULL,
+            num2      INTEGER NOT NULL,
+            num3      INTEGER NOT NULL,
+            pattern   TEXT NOT NULL,
+            draw_date TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def run_full_scrape():
+    """运行全量爬虫"""
+    try:
+        scraper_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scraper_3d.py")
+        with st.spinner("🕷️ 正在从官网抓取历史数据，请稍候..."):
+            result = subprocess.run(
+                ["python", scraper_path, "--full"],
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            if result.returncode == 0:
+                st.cache_resource.clear()
+                return True, "✅ 数据抓取成功！"
+            else:
+                return False, f"❌ 数据抓取失败：{result.stderr[:300]}"
+    except subprocess.TimeoutExpired:
+        return False, "❌ 爬虫超时，请稍后重试"
+    except Exception as e:
+        return False, f"❌ 爬虫异常：{str(e)}"
+
+
 def check_and_update_data():
     """检查数据库最新日期，如果是 21:45 以后且没有今天的数据，自动运行爬虫"""
     try:
@@ -26,7 +68,7 @@ def check_and_update_data():
         conn.close()
 
         if not row or not row[0]:
-            return "数据库为空，请先运行数据爬取"
+            return None, False
 
         latest_date = row[0]
         today = datetime.now().strftime("%Y-%m-%d")
@@ -45,17 +87,17 @@ def check_and_update_data():
 
                 if result.returncode == 0:
                     st.cache_resource.clear()
-                    return f"✅ 数据已自动更新完成（最新日期：{latest_date} → 检查中...）"
+                    return f"✅ 数据已自动更新完成", True
                 else:
-                    return f"⚠️ 自动更新失败：{result.stderr[:200]}"
+                    return f"⚠️ 自动更新失败", False
 
         elif latest_date == today:
-            return None
+            return None, True
         else:
-            return None
+            return None, True
 
     except Exception as e:
-        return f"⚠️ 检查更新时出错：{str(e)}"
+        return f"⚠️ 检查更新时出错：{str(e)}", False
 
 
 @st.cache_resource
@@ -169,17 +211,37 @@ def simulate_group(df, digits):
     }
 
 
+# 初始化数据库表
+init_db()
+
+# 检查并自动更新数据
+update_message, has_data = check_and_update_data()
+
+# 如果数据库为空，提供自动抓取按钮
+if not has_data:
+    st.title("🎲 福彩3D 智能分析平台")
+    st.info("📦 数据库为空，点击下方按钮自动抓取历史数据")
+    
+    if st.button("🕷️ 开始抓取历史数据", type="primary", use_container_width=True):
+        success, message = run_full_scrape()
+        if success:
+            st.success(message)
+            st.info("✅ 数据已就绪，页面将自动刷新...")
+            st.rerun()
+        else:
+            st.error(message)
+    
+    st.stop()
+
+# 加载数据
 df = load_records()
 
-update_message = check_and_update_data()
+# 显示更新提示
 if update_message:
     if update_message.startswith("✅"):
         st.success(update_message)
-        df = load_records()
     elif update_message.startswith("⚠️"):
         st.warning(update_message)
-    else:
-        st.info(update_message)
 
 if df.empty:
     st.error("数据库为空，请先运行 `python scraper_3d.py --full` 爬取数据")
