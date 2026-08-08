@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import re
 import time
 import os
+import sqlite3
 
 import requests
 from bs4 import BeautifulSoup
@@ -13,16 +14,49 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-BASE_URL = "http://kaijiang.zhcw.com/zhcw/inc/3d/3d_wqhg.jsp?pageNum={}"
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-}
+DB_FILE = "lottery_data.db"
+TABLE_NAME = "history3d"
+
+DATA_SOURCES = [
+    {
+        "name": "中彩网",
+        "url": "http://kaijiang.zhcw.com/zhcw/inc/3d/3d_wqhg.jsp?pageNum={}",
+        "headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Referer": "http://kaijiang.zhcw.com/zhcw/html/3d/list_1.html",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-User": "?1",
+            "Cache-Control": "max-age=0",
+        },
+    },
+    {
+        "name": "新浪彩票",
+        "url": "https://history.sina.com.cn/lottery/3d?page={}",
+        "headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Referer": "https://history.sina.com.cn/lottery/3d",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-User": "?1",
+        },
+    },
+]
+
+TIMEOUT = 10
+MAX_RETRIES = 3
 
 MULTIPLIERS = {5: 15.0, 6: 7.5, 7: 4.3}
 
@@ -51,23 +85,28 @@ def normalize_date(raw):
     return raw
 
 
-def fetch_page(session, page_num, max_retries=5):
-    url = BASE_URL.format(page_num)
+def fetch_page_with_retry(session, url, max_retries=MAX_RETRIES):
+    last_status = None
+    last_error = None
     for attempt in range(1, max_retries + 1):
         try:
-            resp = session.get(url, timeout=45, verify=False)
+            resp = session.get(url, timeout=TIMEOUT, verify=False)
+            last_status = resp.status_code
             resp.encoding = "utf-8"
             if resp.status_code == 200:
-                return resp.text
+                return resp.text, None
             elif resp.status_code == 403:
-                time.sleep(5)
+                time.sleep(3)
             elif resp.status_code == 429:
-                time.sleep(10)
-        except requests.RequestException:
+                time.sleep(5)
+            else:
+                time.sleep(2)
+        except requests.RequestException as e:
+            last_error = str(e)
             if attempt < max_retries:
-                wait_time = min(attempt * 5, 30)
-                time.sleep(wait_time)
-    return None
+                time.sleep(min(attempt * 3, 15))
+    error_msg = f"HTTP {last_status}" if last_status else last_error
+    return None, error_msg
 
 
 def parse_page(html):
@@ -128,72 +167,85 @@ def load_records():
     """智能加载数据：优先本地数据库，失败则从官网抓取"""
     # 方案1：尝试从本地数据库读取
     try:
-        conn = sqlite3.connect(DB_FILE)
-        df = pd.read_sql_query(
-            f"SELECT period, num1, num2, num3, pattern, draw_date "
-            f"FROM {TABLE_NAME} ORDER BY period ASC",
-            conn,
-        )
-        conn.close()
-        if not df.empty:
-            return df
-    except Exception:
+        if os.path.exists(DB_FILE):
+            conn = sqlite3.connect(DB_FILE)
+            df = pd.read_sql_query(
+                f"SELECT period, num1, num2, num3, pattern, draw_date "
+                f"FROM {TABLE_NAME} ORDER BY period ASC",
+                conn,
+            )
+            conn.close()
+            if not df.empty:
+                return df, True, None
+    except Exception as e:
         pass
     
     # 方案2：从官网实时抓取
-    try:
-        return fetch_from_web()
-    except Exception as e:
-        st.error(f"数据加载失败：{str(e)}")
-        return pd.DataFrame()
+    df, error_msg, status_codes = fetch_from_web()
+    if not df.empty:
+        return df, False, None
+    
+    # 方案3：所有方式都失败
+    return pd.DataFrame(), False, {"error": error_msg, "status_codes": status_codes}
 
 
 @st.cache_data(ttl=3600)
 def fetch_from_web():
-    """从官网抓取近一年数据"""
-    session = requests.Session()
-    session.trust_env = False
-    session.headers.update(HEADERS)
-
+    """从多数据源抓取近一年数据，返回 DataFrame, error_msg, status_codes"""
     cutoff = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+    all_status_codes = []
 
-    all_records = []
-    page = 1
-    should_continue = True
+    for source_idx, source in enumerate(DATA_SOURCES):
+        try:
+            session = requests.Session()
+            session.trust_env = False
+            session.headers.update(source["headers"])
 
-    progress_bar = st.progress(0, text="🕷️ 正在从官网抓取数据...")
-    status_text = st.empty()
+            all_records = []
+            page = 1
+            should_continue = True
 
-    while should_continue:
-        status_text.text(f"正在抓取第 {page} 页...")
-        html = fetch_page(session, page)
-        if html is None:
-            break
+            progress_bar = st.progress(0, text=f"🕷️ 正在从 {source['name']} 抓取数据...")
+            status_text = st.empty()
 
-        records = parse_page(html)
-        if not records:
-            break
+            while should_continue:
+                status_text.text(f"正在抓取第 {page} 页...")
+                url = source["url"].format(page)
+                html, error = fetch_page_with_retry(session, url)
+                
+                if html is None:
+                    if error:
+                        all_status_codes.append(error)
+                    break
 
-        for rec in records:
-            if rec["draw_date"] < cutoff:
-                should_continue = False
-                break
-            all_records.append(rec)
+                records = parse_page(html)
+                if not records:
+                    break
 
-        progress_bar.progress(min(page * 10, 90), text=f"已抓取 {len(all_records)} 期数据...")
-        page += 1
-        time.sleep(0.5)
+                for rec in records:
+                    if rec["draw_date"] < cutoff:
+                        should_continue = False
+                        break
+                    all_records.append(rec)
 
-    progress_bar.progress(100, text="✅ 数据抓取完成！")
-    status_text.empty()
+                progress_bar.progress(min(page * 10, 90), text=f"已从 {source['name']} 抓取 {len(all_records)} 期数据...")
+                page += 1
+                time.sleep(0.5)
 
-    if not all_records:
-        return pd.DataFrame()
+            progress_bar.empty()
+            status_text.empty()
 
-    df = pd.DataFrame(all_records)
-    df = df.drop_duplicates(subset=["period"], keep="first")
-    df = df.sort_values("period", ascending=True).reset_index(drop=True)
-    return df
+            if all_records:
+                df = pd.DataFrame(all_records)
+                df = df.drop_duplicates(subset=["period"], keep="first")
+                df = df.sort_values("period", ascending=True).reset_index(drop=True)
+                return df, None, all_status_codes
+
+        except Exception as e:
+            all_status_codes.append(f"{source['name']}: {str(e)}")
+            continue
+
+    return pd.DataFrame(), f"所有数据源均失败", all_status_codes
 
 
 def calc_missing(df):
@@ -295,15 +347,23 @@ def simulate_group(df, digits):
     }
 
 
-df = load_records()
+df, is_offline, error_info = load_records()
 
 if df.empty:
-    st.error("❌ 无法从官网获取数据")
-    st.warning("""
+    st.error("❌ 无法获取数据")
+    status_detail = ""
+    if error_info:
+        status_detail = f"\n\n**HTTP 状态码详情：**\n"
+        for code in error_info.get("status_codes", []):
+            status_detail += f"- {code}\n"
+        status_detail += f"\n**错误信息：** {error_info.get('error', '未知错误')}"
+    
+    st.warning(f"""
     **可能的原因：**
     1. 官网服务器暂时不可用
     2. 网络连接不稳定
     3. 请求频率过高被限制
+    {status_detail}
     
     **解决方案：**
     - 等待 1-2 分钟后点击右下角"↻ Rerun"刷新页面
@@ -317,6 +377,9 @@ if df.empty:
         st.rerun()
     
     st.stop()
+
+if is_offline:
+    st.warning("⚠️ 当前为离线数据，实时更新暂时受阻。显示的是本地数据库中的历史数据。")
 
 zu3_missing = calc_zu3_missing(df)
 zu3_avg = calc_zu3_avg_interval(df)
