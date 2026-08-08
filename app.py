@@ -1,140 +1,167 @@
-import sqlite3
 import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 from math import comb
-from datetime import datetime
-import subprocess
-import os
+from datetime import datetime, timedelta
+import re
+import time
 
-DB_FILE = "lottery_data.db"
-TABLE_NAME = "history3d"
+import requests
+from bs4 import BeautifulSoup
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+BASE_URL = "http://kaijiang.zhcw.com/zhcw/inc/3d/3d_wqhg.jsp?pageNum={}"
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
+
 MULTIPLIERS = {5: 15.0, 6: 7.5, 7: 4.3}
 
 st.set_page_config(page_title="福彩3D 智能分析", layout="wide")
 
 
-def init_db():
-    """初始化数据库表结构"""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
-            period    TEXT PRIMARY KEY,
-            num1      INTEGER NOT NULL,
-            num2      INTEGER NOT NULL,
-            num3      INTEGER NOT NULL,
-            pattern   TEXT NOT NULL,
-            draw_date TEXT NOT NULL
-        )
-        """
-    )
-    conn.commit()
-    conn.close()
+def determine_pattern(n1, n2, n3):
+    if n1 == n2 == n3:
+        return "豹子"
+    if n1 == n2 or n2 == n3 or n1 == n3:
+        return "组三"
+    return "组六"
 
 
-def ensure_dependencies():
-    """确保爬虫所需的依赖库已安装"""
-    required_modules = ['requests', 'bs4', 'schedule', 'urllib3']
-    missing_modules = []
-    
-    for module in required_modules:
+def normalize_date(raw):
+    raw = raw.strip()
+    m = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})", raw)
+    if m:
+        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    m = re.match(r"(\d{4})/(\d{1,2})/(\d{1,2})", raw)
+    if m:
+        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    m = re.match(r"(\d{4})年(\d{1,2})月(\d{1,2})日", raw)
+    if m:
+        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    return raw
+
+
+def fetch_page(session, page_num, max_retries=3):
+    url = BASE_URL.format(page_num)
+    for attempt in range(1, max_retries + 1):
         try:
-            __import__(module)
-        except ImportError:
-            missing_modules.append(module)
-    
-    if missing_modules:
-        with st.spinner(f"📦 正在安装依赖库：{', '.join(missing_modules)}..."):
-            subprocess.run(
-                ["pip", "install", "-r", "requirements.txt"],
-                capture_output=True,
-                text=True,
-                timeout=180,
-            )
-        return True
-    return False
+            resp = session.get(url, timeout=30, verify=False)
+            resp.encoding = "utf-8"
+            if resp.status_code == 200:
+                return resp.text
+        except requests.RequestException:
+            if attempt < max_retries:
+                time.sleep(attempt * 3)
+    return None
 
 
-def run_full_scrape():
-    """运行全量爬虫"""
-    try:
-        # 先确保依赖已安装
-        ensure_dependencies()
-        
-        scraper_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scraper_3d.py")
-        with st.spinner("🕷️ 正在从官网抓取历史数据，请稍候..."):
-            result = subprocess.run(
-                ["python", scraper_path, "--full"],
-                capture_output=True,
-                text=True,
-                timeout=300,
-            )
-            if result.returncode == 0:
-                st.cache_resource.clear()
-                return True, "✅ 数据抓取成功！"
+def parse_page(html):
+    soup = BeautifulSoup(html, "html.parser")
+    results = []
+
+    table = soup.find("table", class_="wqhgt")
+    if not table:
+        table = soup.find("table")
+    if not table:
+        return results
+
+    all_rows = table.find_all("tr")
+    data_rows = all_rows[2:-1]
+
+    for row in data_rows:
+        tds = row.find_all("td")
+        if len(tds) < 3:
+            continue
+
+        try:
+            raw_date = tds[0].get_text(strip=True)
+            if not re.search(r"\d{4}", raw_date):
+                continue
+
+            period = tds[1].get_text(strip=True)
+            if not re.match(r"^\d{5,}$", period):
+                continue
+
+            em_tags = tds[2].find_all("em")
+            if em_tags:
+                digits = [em.get_text(strip=True) for em in em_tags]
             else:
-                return False, f"❌ 数据抓取失败：{result.stderr[:300]}"
-    except subprocess.TimeoutExpired:
-        return False, "❌ 爬虫超时，请稍后重试"
-    except Exception as e:
-        return False, f"❌ 爬虫异常：{str(e)}"
+                digits = re.findall(r"\d", tds[2].get_text(strip=True))
+
+            if len(digits) < 3:
+                continue
+
+            n1, n2, n3 = int(digits[0]), int(digits[1]), int(digits[2])
+            draw_date = normalize_date(raw_date)
+            pattern = determine_pattern(n1, n2, n3)
+            results.append({
+                "period": period,
+                "num1": n1,
+                "num2": n2,
+                "num3": n3,
+                "pattern": pattern,
+                "draw_date": draw_date,
+            })
+        except (ValueError, IndexError):
+            continue
+
+    return results
 
 
-def check_and_update_data():
-    """检查数据库最新日期，如果是 21:45 以后且没有今天的数据，自动运行爬虫"""
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute(
-            f"SELECT MAX(draw_date) FROM {TABLE_NAME}"
-        )
-        row = cursor.fetchone()
-        conn.close()
-
-        if not row or not row[0]:
-            return None, False
-
-        latest_date = row[0]
-        today = datetime.now().strftime("%Y-%m-%d")
-        current_time = datetime.now().time()
-        cutoff_time = datetime.strptime("21:45", "%H:%M").time()
-
-        if latest_date < today and current_time >= cutoff_time:
-            with st.spinner("🔄 检测到数据未更新，正在自动抓取最新开奖数据..."):
-                scraper_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scraper_3d.py")
-                result = subprocess.run(
-                    ["python", scraper_path, "--update"],
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                )
-
-                if result.returncode == 0:
-                    st.cache_resource.clear()
-                    return f"✅ 数据已自动更新完成", True
-                else:
-                    return f"⚠️ 自动更新失败", False
-
-        elif latest_date == today:
-            return None, True
-        else:
-            return None, True
-
-    except Exception as e:
-        return f"⚠️ 检查更新时出错：{str(e)}", False
-
-
-@st.cache_resource
+@st.cache_resource(ttl=1800)
 def load_records():
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query(
-        f"SELECT period, num1, num2, num3, pattern, draw_date "
-        f"FROM {TABLE_NAME} ORDER BY period ASC",
-        conn,
-    )
-    conn.close()
+    """直接从官网抓取近一年数据，存入内存 DataFrame"""
+    session = requests.Session()
+    session.trust_env = False
+    session.headers.update(HEADERS)
+
+    cutoff = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+
+    all_records = []
+    page = 1
+    should_continue = True
+
+    progress_bar = st.progress(0, text="🕷️ 正在从官网抓取数据...")
+    status_text = st.empty()
+
+    while should_continue:
+        status_text.text(f"正在抓取第 {page} 页...")
+        html = fetch_page(session, page)
+        if html is None:
+            break
+
+        records = parse_page(html)
+        if not records:
+            break
+
+        for rec in records:
+            if rec["draw_date"] < cutoff:
+                should_continue = False
+                break
+            all_records.append(rec)
+
+        progress_bar.progress(min(page * 10, 90), text=f"已抓取 {len(all_records)} 期数据...")
+        page += 1
+        time.sleep(0.5)
+
+    progress_bar.progress(100, text="✅ 数据抓取完成！")
+    status_text.empty()
+
+    if not all_records:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(all_records)
+    df = df.drop_duplicates(subset=["period"], keep="first")
+    df = df.sort_values("period", ascending=True).reset_index(drop=True)
     return df
 
 
@@ -237,40 +264,10 @@ def simulate_group(df, digits):
     }
 
 
-# 初始化数据库表
-init_db()
-
-# 检查并自动更新数据
-update_message, has_data = check_and_update_data()
-
-# 如果数据库为空，提供自动抓取按钮
-if not has_data:
-    st.title("🎲 福彩3D 智能分析平台")
-    st.info("📦 数据库为空，点击下方按钮自动抓取历史数据")
-    
-    if st.button("🕷️ 开始抓取历史数据", type="primary", use_container_width=True):
-        success, message = run_full_scrape()
-        if success:
-            st.success(message)
-            st.info("✅ 数据已就绪，页面将自动刷新...")
-            st.rerun()
-        else:
-            st.error(message)
-    
-    st.stop()
-
-# 加载数据
 df = load_records()
 
-# 显示更新提示
-if update_message:
-    if update_message.startswith("✅"):
-        st.success(update_message)
-    elif update_message.startswith("⚠️"):
-        st.warning(update_message)
-
 if df.empty:
-    st.error("数据库为空，请先运行 `python scraper_3d.py --full` 爬取数据")
+    st.error("❌ 无法从官网获取数据，请稍后刷新页面重试")
     st.stop()
 
 zu3_missing = calc_zu3_missing(df)
