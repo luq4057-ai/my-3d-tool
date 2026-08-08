@@ -50,17 +50,22 @@ def normalize_date(raw):
     return raw
 
 
-def fetch_page(session, page_num, max_retries=3):
+def fetch_page(session, page_num, max_retries=5):
     url = BASE_URL.format(page_num)
     for attempt in range(1, max_retries + 1):
         try:
-            resp = session.get(url, timeout=30, verify=False)
+            resp = session.get(url, timeout=45, verify=False)
             resp.encoding = "utf-8"
             if resp.status_code == 200:
                 return resp.text
+            elif resp.status_code == 403:
+                time.sleep(5)
+            elif resp.status_code == 429:
+                time.sleep(10)
         except requests.RequestException:
             if attempt < max_retries:
-                time.sleep(attempt * 3)
+                wait_time = min(attempt * 5, 30)
+                time.sleep(wait_time)
     return None
 
 
@@ -119,7 +124,33 @@ def parse_page(html):
 
 @st.cache_resource(ttl=1800)
 def load_records():
-    """直接从官网抓取近一年数据，存入内存 DataFrame"""
+    """智能加载数据：优先本地数据库，失败则从官网抓取"""
+    # 方案1：尝试从本地数据库读取
+    if os.path.exists(DB_FILE):
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            df = pd.read_sql_query(
+                f"SELECT period, num1, num2, num3, pattern, draw_date "
+                f"FROM {TABLE_NAME} ORDER BY period ASC",
+                conn,
+            )
+            conn.close()
+            if not df.empty:
+                return df
+        except Exception:
+            pass
+    
+    # 方案2：从官网实时抓取
+    try:
+        return fetch_from_web()
+    except Exception as e:
+        st.error(f"数据加载失败：{str(e)}")
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=3600)
+def fetch_from_web():
+    """从官网抓取近一年数据"""
     session = requests.Session()
     session.trust_env = False
     session.headers.update(HEADERS)
@@ -267,7 +298,24 @@ def simulate_group(df, digits):
 df = load_records()
 
 if df.empty:
-    st.error("❌ 无法从官网获取数据，请稍后刷新页面重试")
+    st.error("❌ 无法从官网获取数据")
+    st.warning("""
+    **可能的原因：**
+    1. 官网服务器暂时不可用
+    2. 网络连接不稳定
+    3. 请求频率过高被限制
+    
+    **解决方案：**
+    - 等待 1-2 分钟后点击右下角"↻ Rerun"刷新页面
+    - 检查本地是否有 `lottery_data.db` 文件
+    - 在本地运行 `python scraper_3d.py --full` 抓取数据
+    """)
+    
+    if st.button("🔄 重新尝试加载数据"):
+        st.cache_resource.clear()
+        st.cache_data.clear()
+        st.rerun()
+    
     st.stop()
 
 zu3_missing = calc_zu3_missing(df)
