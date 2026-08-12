@@ -548,6 +548,183 @@ class LotteryPatternEngine:
         return schemes
 
 
+def evaluate_user_numbers(input_nums, df_feat):
+    n1, n2, n3 = sorted(input_nums)
+    total = len(df_feat)
+    recent = df_feat.tail(30)
+    last = df_feat.iloc[-1]
+    prev_nums = {last["num1"], last["num2"], last["num3"]}
+
+    sum_val = n1 + n2 + n3
+    sum_tail = sum_val % 10
+    roads = [n1 % 3, n2 % 3, n3 % 3]
+    road_set = set(roads)
+    span = n3 - n1
+
+    score = 0
+    details = []
+
+    # 1) sum distribution (0-20 points)
+    sum_freq = sum(1 for _, r in df_feat.iterrows() if r["sum_val"] == sum_val)
+    sum_prob = sum_freq / total if total > 0 else 0
+    if 7 <= sum_val <= 20:
+        score += 20
+        details.append(f"和值{sum_val}处于高频区(7-20)")
+    elif 4 <= sum_val <= 6 or 21 <= sum_val <= 23:
+        score += 12
+        details.append(f"和值{sum_val}处于中频区")
+    else:
+        score += 4
+        details.append(f"和值{sum_val}处于极低频区(0-3或24-27)")
+
+    # 2) 012 road balance (0-20 points)
+    if len(road_set) == 3:
+        score += 20
+        details.append("012路全占(0/1/2路各一)，平衡度极佳")
+    elif len(road_set) == 2:
+        score += 14
+        missing_road = [r for r in [0, 1, 2] if r not in road_set][0]
+        details.append(f"012路缺{missing_road}路，平衡度中等")
+    else:
+        score += 6
+        details.append(f"012路全为{roads[0]}路，严重偏态")
+
+    # 3) digit hotness (0-20 points)
+    hotness = calc_hotness(df_feat, 30)
+    missing = calc_missing(df_feat)
+    hot_score = 0
+    hot_details = []
+    for d in [n1, n2, n3]:
+        freq = hotness.get(d, 0)
+        miss = missing.get(d, 0)
+        avg_miss = total / 10.0
+        if freq >= 12:
+            hot_score += 7
+            hot_details.append(f"{d}为热号(近30期{freq}次)")
+        elif miss > avg_miss * 2:
+            hot_score += 6
+            hot_details.append(f"{d}为回补号(遗漏{miss}期)")
+        elif freq >= 8:
+            hot_score += 5
+            hot_details.append(f"{d}为温号(近30期{freq}次)")
+        elif freq <= 5:
+            hot_score += 1
+            hot_details.append(f"{d}为冷号(近30期仅{freq}次)")
+        else:
+            hot_score += 3
+            hot_details.append(f"{d}为一般号(近30期{freq}次)")
+    hot_score = min(hot_score, 20)
+    score += hot_score
+    details.extend(hot_details)
+
+    # 4) span distribution (0-20 points)
+    span_freq = sum(1 for _, r in df_feat.iterrows() if r["span"] == span)
+    span_prob = span_freq / total if total > 0 else 0
+    if 3 <= span <= 7:
+        score += 20
+        details.append(f"跨度{span}处于高频区(3-7)")
+    elif span in [2, 8]:
+        score += 12
+        details.append(f"跨度{span}处于中频区")
+    else:
+        score += 4
+        details.append(f"跨度{span}处于极低频区(0-1或9)")
+
+    # 5) neighbor/isolated/transmit (0-20 points)
+    tags = []
+    for d in [n1, n2, n3]:
+        if d in prev_nums:
+            tags.append("传")
+        elif any(abs(d - p) == 1 or abs(d - p) == 9 for p in prev_nums):
+            tags.append("邻")
+        else:
+            tags.append("孤")
+    c, l, g = tags.count("传"), tags.count("邻"), tags.count("孤")
+
+    if c == 1 and l >= 1:
+        score += 18
+        details.append(f"邻孤传{c}传{l}邻{g}孤，传邻结合较佳")
+    elif c >= 2:
+        score += 14
+        details.append(f"邻孤传{c}传{l}邻{g}孤，传号偏多")
+    elif l >= 2:
+        score += 16
+        details.append(f"邻孤传{c}传{l}邻{g}孤，邻号活跃")
+    elif g >= 2:
+        score += 8
+        details.append(f"邻孤传{c}传{l}邻{g}孤，孤号偏多(与上期关联弱)")
+    else:
+        score += 12
+        details.append(f"邻孤传{c}传{l}邻{g}孤")
+
+    # kill numbers & core numbers
+    engine = LotteryPatternEngine(df_feat)
+    streaks = engine.streak_scan(min_len=3)
+    recoveries = engine.missing_recovery()
+
+    digit_kill_score = {}
+    for d in range(10):
+        ks = 0.0
+        freq = hotness.get(d, 0)
+        if freq <= 5:
+            ks += 3.0
+        miss = missing.get(d, 0)
+        if miss == 0:
+            ks += 1.0
+        for s in streaks:
+            if s["feature"] == "和尾大小" and s["opposite"]:
+                if s["opposite"] == "小" and d >= 5:
+                    ks += 2.0
+                elif s["opposite"] == "大" and d < 5:
+                    ks += 2.0
+            if s["feature"] == "和值奇偶" and s["opposite"]:
+                if s["opposite"] == "偶" and d % 2 == 1:
+                    ks += 1.5
+                elif s["opposite"] == "奇" and d % 2 == 0:
+                    ks += 1.5
+        digit_kill_score[d] = ks
+
+    kill_numbers = sorted(range(10), key=lambda d: -digit_kill_score[d])[:2]
+    core_numbers = sorted(range(10), key=lambda d: digit_kill_score[d])[:2]
+
+    # generate explanation
+    if score >= 80:
+        verdict = "⭐ 强力推荐"
+    elif score >= 65:
+        verdict = "✅ 值得关注"
+    elif score >= 50:
+        verdict = "⚠️ 一般偏弱"
+    else:
+        verdict = "❌ 不建议选择"
+
+    explanation = f"此码和值{sum_val}"
+    if 7 <= sum_val <= 20:
+        explanation += "，处于高频区"
+    else:
+        explanation += "，处于低频区"
+    explanation += "；"
+    explanation += "；".join(hot_details[:2]) + "；"
+    if any(d in kill_numbers for d in [n1, n2, n3]):
+        hit_kills = [d for d in [n1, n2, n3] if d in kill_numbers]
+        explanation += f"包含杀号{''.join(map(str, hit_kills))}，需警惕"
+    else:
+        explanation += "避开了当前杀号，较为安全"
+
+    return {
+        "score": score,
+        "verdict": verdict,
+        "details": details,
+        "kill_numbers": kill_numbers,
+        "core_numbers": core_numbers,
+        "explanation": explanation,
+        "sum_val": sum_val,
+        "sum_tail": sum_tail,
+        "roads": roads,
+        "span": span,
+        "lgc": f"{c}传{l}邻{g}孤",
+    }
+
+
 def calc_missing(df):
     result = {}
     for digit in range(10):
@@ -1206,3 +1383,97 @@ with tab4:
     st.dataframe(pd.DataFrame(chain_data), use_container_width=True, hide_index=True)
 
     st.caption("⚠️ 以上分析基于历史数据统计规律，仅供参考，不构成投注建议。彩票开奖为随机事件。")
+
+    st.divider()
+    st.subheader("🔍 号码评价器")
+    st.markdown("选择 3 个数字，系统将基于五维模型计算推荐指数")
+
+    eval_cols = st.columns(3)
+    with eval_cols[0]:
+        sel_1 = st.selectbox("第一位", list(range(10)), key="eval_n1")
+    with eval_cols[1]:
+        sel_2 = st.selectbox("第二位", list(range(10)), key="eval_n2")
+    with eval_cols[2]:
+        sel_3 = st.selectbox("第三位", list(range(10)), key="eval_n3")
+
+    if st.button("📊 开始评价", use_container_width=True, key="eval_btn"):
+        result = evaluate_user_numbers([sel_1, sel_2, sel_3], df_feat)
+
+        score_color = "#6bcb77" if result["score"] >= 65 else "#ffd93d" if result["score"] >= 50 else "#ff6b6b"
+        st.markdown(
+            f'<div style="text-align:center;padding:24px;background:linear-gradient(135deg,#1a1a2e,#0f3460);'
+            f'border-radius:16px;border:2px solid {score_color}">'
+            f'<div style="font-size:14px;color:#aaa;margin-bottom:8px">推荐指数</div>'
+            f'<div style="font-size:64px;font-weight:bold;color:{score_color}">{result["score"]}</div>'
+            f'<div style="font-size:20px;color:{score_color};margin-top:4px">{result["verdict"]}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        dim_cols = st.columns(5)
+        dim_names = ["和值分布", "012路平衡", "数字热度", "跨度分布", "邻孤传"]
+        dim_scores = []
+        s = result["score"]
+        for detail in result["details"][:5]:
+            dim_scores.append(min(20, max(0, s // 5)))
+        dim_actual = [0] * 5
+        for detail in result["details"]:
+            if "和值" in detail:
+                dim_actual[0] = 20 if "高频" in detail else 12 if "中频" in detail else 4
+            elif "012路" in detail:
+                dim_actual[1] = 20 if "全占" in detail else 14 if "缺" in detail else 6
+            elif "热号" in detail or "回补" in detail or "温号" in detail or "冷号" in detail or "一般号" in detail:
+                if dim_actual[2] == 0:
+                    dim_actual[2] = min(20, result["score"] - sum(dim_actual) + dim_actual[2])
+            elif "跨度" in detail:
+                dim_actual[3] = 20 if "高频" in detail else 12 if "中频" in detail else 4
+            elif "邻孤传" in detail:
+                dim_actual[4] = 18 if "较佳" in detail else 16 if "活跃" in detail else 14 if "偏多" in detail else 12
+
+        for i, (name, sc) in enumerate(zip(dim_names, dim_actual)):
+            bar_color = "#6bcb77" if sc >= 16 else "#ffd93d" if sc >= 10 else "#ff6b6b"
+            with dim_cols[i]:
+                st.markdown(
+                    f'<div style="text-align:center">'
+                    f'<div style="font-size:11px;color:#aaa;margin-bottom:4px">{name}</div>'
+                    f'<div style="font-size:24px;font-weight:bold;color:{bar_color}">{sc}</div>'
+                    f'<div style="background:#333;height:4px;border-radius:2px;margin-top:4px">'
+                    f'<div style="background:{bar_color};height:4px;border-radius:2px;width:{sc * 5}%"></div>'
+                    f'</div></div>',
+                    unsafe_allow_html=True,
+                )
+
+        st.markdown("#### 📝 评价详情")
+        for detail in result["details"]:
+            icon = "✅" if any(kw in detail for kw in ["高频", "全占", "热号", "回补", "较佳", "活跃"]) else "⚠️" if any(kw in detail for kw in ["中频", "缺", "温号", "一般", "偏多"]) else "❌"
+            st.markdown(f"- {icon} {detail}")
+
+        st.markdown("#### 🎯 杀码与胆码")
+        kc1, kc2, kc3, kc4 = st.columns(4)
+        kc1.markdown(
+            f'<div style="text-align:center;padding:12px;background:#2e1a1a;border-radius:8px">'
+            f'<div style="color:#ff6b6b;font-size:12px">杀号1</div>'
+            f'<div style="font-size:28px;font-weight:bold;color:#ff6b6b">{result["kill_numbers"][0]}</div></div>',
+            unsafe_allow_html=True,
+        )
+        kc2.markdown(
+            f'<div style="text-align:center;padding:12px;background:#2e1a1a;border-radius:8px">'
+            f'<div style="color:#ff6b6b;font-size:12px">杀号2</div>'
+            f'<div style="font-size:28px;font-weight:bold;color:#ff6b6b">{result["kill_numbers"][1]}</div></div>',
+            unsafe_allow_html=True,
+        )
+        kc3.markdown(
+            f'<div style="text-align:center;padding:12px;background:#1a2e1a;border-radius:8px">'
+            f'<div style="color:#6bcb77;font-size:12px">胆码1</div>'
+            f'<div style="font-size:28px;font-weight:bold;color:#6bcb77">{result["core_numbers"][0]}</div></div>',
+            unsafe_allow_html=True,
+        )
+        kc4.markdown(
+            f'<div style="text-align:center;padding:12px;background:#1a2e1a;border-radius:8px">'
+            f'<div style="color:#6bcb77;font-size:12px">胆码2</div>'
+            f'<div style="font-size:28px;font-weight:bold;color:#6bcb77">{result["core_numbers"][1]}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("#### 💬 综合评语")
+        st.info(result["explanation"])
