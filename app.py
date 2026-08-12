@@ -1178,7 +1178,21 @@ with tab3:
     )
 
     groups = []
-    default_sevens = ["0135789", "0245689", "1356789"]
+
+    try:
+        _engine = LotteryPatternEngine(df_feat)
+        _schemes = _engine.generate_schemes(n_schemes=3)
+        default_sevens = [''.join(map(str, s['digits'])) for s in _schemes]
+        scheme_reasons = [s.get('reasons', []) for s in _schemes]
+    except Exception:
+        default_sevens = ["0135789", "0245689", "1356789"]
+        scheme_reasons = [[], [], []]
+
+    _hotness_map = calc_hotness(df_feat, 30)
+
+    def _rank_by_hotness(digits, hotness):
+        return sorted(digits, key=lambda d: (-hotness.get(d, 0), d))
+
     for i in range(3):
         with st.container():
             cols = st.columns([2, 2, 2])
@@ -1189,11 +1203,15 @@ with tab3:
                     key=f"seven_{i}",
                     max_chars=7,
                 )
+                if scheme_reasons[i]:
+                    st.caption(" · ".join(scheme_reasons[i][:2]))
+
             seven_digits = [int(c) for c in raw if c.isdigit()]
             seven_digits = list(dict.fromkeys(seven_digits))[:7]
 
-            six_digits = seven_digits[:6] if len(seven_digits) >= 6 else []
-            five_digits = seven_digits[:5] if len(seven_digits) >= 5 else []
+            ranked = _rank_by_hotness(seven_digits, _hotness_map)
+            six_digits = ranked[:6] if len(ranked) >= 6 else []
+            five_digits = ranked[:5] if len(ranked) >= 5 else []
 
             with cols[1]:
                 st.markdown(
