@@ -5,6 +5,7 @@ from math import comb
 from datetime import datetime
 import re
 import sqlite3
+import itertools
 
 MULTIPLIERS = {5: 15.0, 6: 7.5, 7: 4.3}
 
@@ -516,33 +517,51 @@ class LotteryPatternEngine:
             digit_scores[d] = {"score": score, "reasons": reasons}
 
         ranked = sorted(digit_scores.items(), key=lambda x: -x[1]["score"])
-        schemes = []
-        offsets = [0, 2, 4]
-        for i, offset in enumerate(offsets[:n_schemes]):
-            selected = [d for d, _ in ranked[offset:offset + 7]]
-            if len(selected) < 7:
-                remaining = [d for d, _ in ranked if d not in selected]
-                selected.extend(remaining[:7 - len(selected)])
-            selected = sorted(selected[:7])
+        all_digits = [d for d, _ in ranked]
 
-            top_reasons = []
+        schemes = []
+        rotation_steps = [0, 3, 6]
+        for i, step in enumerate(rotation_steps[:n_schemes]):
+            selected = []
+            for j in range(10):
+                idx = (step + j) % 10
+                d = all_digits[idx]
+                if d not in selected:
+                    selected.append(d)
+                if len(selected) == 7:
+                    break
+            if len(selected) < 7:
+                for d in all_digits:
+                    if d not in selected:
+                        selected.append(d)
+                    if len(selected) == 7:
+                        break
+            selected = sorted(selected)
+
+            digit_reasons = []
             for d in selected:
                 for reason in digit_scores[d]["reasons"][:1]:
-                    if reason not in top_reasons:
-                        top_reasons.append(reason)
+                    if reason not in digit_reasons:
+                        digit_reasons.append(reason)
 
-            scheme_reasons = []
+            context_reasons = []
             for s in streaks[:2]:
                 if s["opposite"]:
-                    scheme_reasons.append(f"{s['feature']}连出{s['streak']}期，关注{s['opposite']}")
+                    t = f"{s['feature']}连出{s['streak']}期，关注{s['opposite']}"
+                    if t not in context_reasons:
+                        context_reasons.append(t)
             for r in recoveries[:2]:
-                scheme_reasons.append(f"{r['pattern']}遗漏{r['current_missing']}期(理论{r['avg_missing']:.1f}期)")
+                t = f"{r['pattern']}遗漏{r['current_missing']}期(理论{r['avg_missing']:.1f}期)"
+                if t not in context_reasons:
+                    context_reasons.append(t)
+
+            scheme_reasons = digit_reasons[:2] + context_reasons[:1]
 
             schemes.append({
                 "index": i + 1,
                 "digits": selected,
                 "reasons": scheme_reasons[:3],
-                "detail": top_reasons[:5],
+                "detail": {d: digit_scores[d] for d in selected},
             })
 
         return schemes
@@ -1179,19 +1198,31 @@ with tab3:
 
     groups = []
 
-    try:
-        _engine = LotteryPatternEngine(df_feat)
-        _schemes = _engine.generate_schemes(n_schemes=3)
-        default_sevens = [''.join(map(str, s['digits'])) for s in _schemes]
-        scheme_reasons = [s.get('reasons', []) for s in _schemes]
-    except Exception:
-        default_sevens = ["0135789", "0245689", "1356789"]
-        scheme_reasons = [[], [], []]
+    _engine = LotteryPatternEngine(df_feat)
+    _schemes = _engine.generate_schemes(n_schemes=3)
+    default_sevens = [''.join(map(str, s['digits'])) for s in _schemes]
+    scheme_reasons = [s.get('reasons', []) for s in _schemes]
 
     _hotness_map = calc_hotness(df_feat, 30)
 
     def _rank_by_hotness(digits, hotness):
         return sorted(digits, key=lambda d: (-hotness.get(d, 0), d))
+
+    def _dedup_subset(ranked, size, prev_keys, hotness):
+        candidate = ranked[:size]
+        key = tuple(sorted(candidate))
+        if key not in prev_keys or len(ranked) <= size:
+            return candidate
+        for swap_pos in range(size - 1, -1, -1):
+            for replacement in ranked[size:]:
+                trial = candidate[:swap_pos] + [replacement] + candidate[swap_pos + 1:]
+                trial_key = tuple(sorted(trial))
+                if trial_key not in prev_keys:
+                    return sorted(trial, key=lambda d: (-hotness.get(d, 0), d))
+        return candidate
+
+    prev_five_keys = []
+    prev_six_keys = []
 
     for i in range(3):
         with st.container():
@@ -1204,14 +1235,25 @@ with tab3:
                     max_chars=7,
                 )
                 if scheme_reasons[i]:
-                    st.caption(" · ".join(scheme_reasons[i][:2]))
+                    st.caption(" · ".join(scheme_reasons[i][:3]))
 
             seven_digits = [int(c) for c in raw if c.isdigit()]
             seven_digits = list(dict.fromkeys(seven_digits))[:7]
 
             ranked = _rank_by_hotness(seven_digits, _hotness_map)
-            six_digits = ranked[:6] if len(ranked) >= 6 else []
-            five_digits = ranked[:5] if len(ranked) >= 5 else []
+
+            if len(ranked) >= 6:
+                six_digits = _dedup_subset(ranked, 6, prev_six_keys, _hotness_map)
+            else:
+                six_digits = ranked[:6] if len(ranked) >= 6 else []
+            prev_six_keys.append(tuple(sorted(six_digits)))
+
+            six_ranked = _rank_by_hotness(six_digits, _hotness_map)
+            if len(six_ranked) >= 5:
+                five_digits = _dedup_subset(six_ranked, 5, prev_five_keys, _hotness_map)
+            else:
+                five_digits = six_ranked[:5] if len(six_ranked) >= 5 else []
+            prev_five_keys.append(tuple(sorted(five_digits)))
 
             with cols[1]:
                 st.markdown(
@@ -1238,6 +1280,36 @@ with tab3:
             if len(five_digits) == 5:
                 group[5] = five_digits
             groups.append(group)
+
+            with st.expander(f"📋 第 {i + 1} 组 · 组六组合注数明细"):
+                combo_rows = []
+                for n_digits, label, multiplier in [(7, "7码", 4.3), (6, "6码", 7.5), (5, "5码", 15.0)]:
+                    digits_set = group.get(n_digits)
+                    if not digits_set:
+                        continue
+                    combos = list(itertools.combinations(sorted(digits_set), 3))
+                    zu6_count = 0
+                    zu3_count = 0
+                    combo_strs = []
+                    for c in combos:
+                        if c[0] == c[1] or c[1] == c[2] or c[0] == c[2]:
+                            continue
+                        combo_strs.append("".join(map(str, c)))
+                        if len(set(c)) == 3:
+                            zu6_count += 1
+                        else:
+                            zu3_count += 1
+                    total_bets = comb(len(digits_set), 3)
+                    cost = total_bets * 2
+                    st.markdown(f"**{label} ({''.join(map(str, sorted(digits_set)))})**")
+                    st.markdown(
+                        f"组六 {zu6_count} 注 + 组三 {zu3_count} 注 = **{total_bets} 注** · 每期 **{cost} 元**"
+                    )
+                    cols_combo = st.columns(min(len(combo_strs), 10))
+                    for ci, cs in enumerate(combo_strs):
+                        with cols_combo[ci % len(cols_combo)]:
+                            st.code(cs, language=None)
+                    st.markdown("---")
 
     analyze = st.button("🚀 开始分析", type="primary", use_container_width=True)
 
