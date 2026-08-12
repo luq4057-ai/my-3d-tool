@@ -164,8 +164,13 @@ def parse_page(html):
 
 @st.cache_resource(ttl=1800)
 def load_records():
-    """智能加载数据：优先本地数据库，失败则从官网抓取"""
-    # 方案1：尝试从本地数据库读取
+    """智能加载数据：优先在线抓取，失败则回退本地数据库"""
+    # 方案1：优先从网络实时抓取
+    df, error_msg, status_codes = fetch_from_web()
+    if not df.empty:
+        return df, False, None
+
+    # 方案2：网络抓取失败，回退本地数据库
     try:
         if os.path.exists(DB_FILE):
             conn = sqlite3.connect(DB_FILE)
@@ -176,15 +181,10 @@ def load_records():
             )
             conn.close()
             if not df.empty:
-                return df, True, None
-    except Exception as e:
+                return df, True, {"error": error_msg, "status_codes": status_codes}
+    except Exception:
         pass
-    
-    # 方案2：从官网实时抓取
-    df, error_msg, status_codes = fetch_from_web()
-    if not df.empty:
-        return df, False, None
-    
+
     # 方案3：所有方式都失败
     return pd.DataFrame(), False, {"error": error_msg, "status_codes": status_codes}
 
@@ -379,7 +379,17 @@ if df.empty:
     st.stop()
 
 if is_offline:
-    st.warning("⚠️ 当前为离线数据，实时更新暂时受阻。显示的是本地数据库中的历史数据。")
+    offline_detail = ""
+    if error_info:
+        codes = error_info.get("status_codes", [])
+        if codes:
+            offline_detail = f"\n\n**网络抓取失败详情：**\n"
+            for code in codes:
+                offline_detail += f"- {code}\n"
+        err = error_info.get("error", "")
+        if err:
+            offline_detail += f"\n**错误信息：** {err}"
+    st.warning(f"⚠️ 当前为离线数据，实时更新暂时受阻。显示的是本地数据库中的历史数据。{offline_detail}")
 
 zu3_missing = calc_zu3_missing(df)
 zu3_avg = calc_zu3_avg_interval(df)
