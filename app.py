@@ -331,6 +331,223 @@ def build_pattern_chain_chart(df_feat, n_periods=5):
     return fig
 
 
+class LotteryPatternEngine:
+    def __init__(self, df):
+        self.df = extract_features(df) if "sum_val" not in df.columns else df.copy()
+        self.total = len(self.df)
+
+    def digit_hotness(self):
+        result = {}
+        for window in [10, 30, 50]:
+            n = min(window, self.total)
+            recent = self.df.tail(n)
+            freq = {}
+            for d in range(10):
+                freq[d] = sum(
+                    1 for _, r in recent.iterrows()
+                    if d in (r["num1"], r["num2"], r["num3"])
+                )
+            result[window] = freq
+        return result
+
+    def streak_scan(self, min_len=3):
+        recent = self.df.tail(30).reset_index(drop=True)
+        streaks = []
+
+        def _scan(series, name, label_fn=None):
+            if len(series) == 0:
+                return
+            val = series.iloc[-1]
+            count = 0
+            for v in series.iloc[::-1]:
+                if v == val:
+                    count += 1
+                else:
+                    break
+            if count >= min_len:
+                display = label_fn(val) if label_fn else str(val)
+                opposite = None
+                if isinstance(val, str) and val in ("大", "小"):
+                    opposite = "小" if val == "大" else "大"
+                elif isinstance(val, str) and val in ("奇", "偶"):
+                    opposite = "偶" if val == "奇" else "奇"
+                streaks.append({
+                    "feature": name,
+                    "value": display,
+                    "streak": count,
+                    "opposite": opposite,
+                })
+
+        _scan(recent["sum_tail_size"], "和尾大小")
+        _scan(recent["sum_road"], "和值012路", lambda v: f"{v}路")
+        _scan(recent["road1"], "百位012路", lambda v: f"{v}路")
+        _scan(recent["road2"], "十位012路", lambda v: f"{v}路")
+        _scan(recent["road3"], "个位012路", lambda v: f"{v}路")
+
+        recent["sum_parity"] = recent["sum_val"].apply(lambda x: "奇" if x % 2 else "偶")
+        _scan(recent["sum_parity"], "和值奇偶")
+
+        recent["odd_count"] = recent.apply(
+            lambda r: sum(1 for d in [r["num1"], r["num2"], r["num3"]] if d % 2 == 1), axis=1
+        )
+        _scan(recent["odd_count"], "奇数个数")
+
+        recent["big_count"] = recent.apply(
+            lambda r: sum(1 for d in [r["num1"], r["num2"], r["num3"]] if d >= 5), axis=1
+        )
+        _scan(recent["big_count"], "大号个数")
+
+        _scan(recent["pattern"], "形态")
+        _scan(recent["span"], "跨度")
+
+        return streaks
+
+    def missing_recovery(self):
+        result = []
+        patterns = {
+            "组三": lambda r: r["pattern"] == "组三",
+            "组六": lambda r: r["pattern"] == "组六",
+            "豹子": lambda r: r["pattern"] == "豹子",
+            "全大(5-9)": lambda r: r["num1"] >= 5 and r["num2"] >= 5 and r["num3"] >= 5,
+            "全小(0-4)": lambda r: r["num1"] < 5 and r["num2"] < 5 and r["num3"] < 5,
+            "全偶": lambda r: r["num1"] % 2 == 0 and r["num2"] % 2 == 0 and r["num3"] % 2 == 0,
+            "全奇": lambda r: r["num1"] % 2 == 1 and r["num2"] % 2 == 1 and r["num3"] % 2 == 1,
+            "0路全占": lambda r: 0 in (r["road1"], r["road2"], r["road3"])
+                                 and 1 in (r["road1"], r["road2"], r["road3"])
+                                 and 2 in (r["road1"], r["road2"], r["road3"]),
+            "和值0路": lambda r: r["sum_road"] == 0,
+            "和值1路": lambda r: r["sum_road"] == 1,
+            "和值2路": lambda r: r["sum_road"] == 2,
+            "和尾大(5-9)": lambda r: r["sum_tail_size"] == "大",
+            "和尾小(0-4)": lambda r: r["sum_tail_size"] == "小",
+        }
+
+        for name, cond in patterns.items():
+            count = 0
+            for _, r in self.df.iloc[::-1].iterrows():
+                if cond(r):
+                    break
+                count += 1
+
+            hits = sum(1 for _, r in self.df.iterrows() if cond(r))
+            prob = hits / self.total if self.total > 0 else 0
+            avg_miss = 1 / prob if prob > 0 else float("inf")
+
+            is_recovery = count > avg_miss * 3 and avg_miss < float("inf")
+            result.append({
+                "pattern": name,
+                "current_missing": count,
+                "hit_count": hits,
+                "probability": prob,
+                "avg_missing": avg_miss,
+                "is_high_recovery": is_recovery,
+            })
+
+        return result
+
+    def generate_schemes(self, n_schemes=3):
+        streaks = self.streak_scan(min_len=3)
+        recoveries = [r for r in self.missing_recovery() if r["is_high_recovery"]]
+        hotness = self.digit_hotness()
+        missing = calc_missing(self.df)
+
+        digit_scores = {}
+        for d in range(10):
+            score = 0.0
+            reasons = []
+
+            miss_val = missing.get(d, 0)
+            total = self.total
+            avg_miss = total / 10.0
+            if miss_val > avg_miss * 2:
+                score += 3.0
+                reasons.append(f"{d}遗漏{miss_val}期(超2倍均值)")
+            elif miss_val > avg_miss:
+                score += 1.5
+                reasons.append(f"{d}遗漏{miss_val}期")
+
+            for window in [10, 30, 50]:
+                freq = hotness[window].get(d, 0)
+                expected = window * 3 / 10.0
+                if freq < expected * 0.5:
+                    score += 1.0
+                    reasons.append(f"近{window}期仅{freq}次")
+
+            for rec in recoveries:
+                pname = rec["pattern"]
+                if "全大" in pname and d >= 5:
+                    score += 2.0
+                    reasons.append(f"全大回补利好{d}")
+                elif "全小" in pname and d < 5:
+                    score += 2.0
+                    reasons.append(f"全小回补利好{d}")
+                elif "全偶" in pname and d % 2 == 0:
+                    score += 2.0
+                    reasons.append(f"全偶回补利好{d}")
+                elif "全奇" in pname and d % 2 == 1:
+                    score += 2.0
+                    reasons.append(f"全奇回补利好{d}")
+                elif f"和值{d % 3}路" in pname:
+                    score += 1.5
+                    reasons.append(f"和值{d % 3}路回补利好{d}")
+
+            for s in streaks:
+                feat = s["feature"]
+                opp = s["opposite"]
+                if feat == "和尾大小" and opp:
+                    if opp == "小" and d < 5:
+                        score += 2.0
+                        reasons.append(f"和尾小反转利好{d}")
+                    elif opp == "大" and d >= 5:
+                        score += 2.0
+                        reasons.append(f"和尾大反转利好{d}")
+                elif feat == "和值奇偶" and opp:
+                    if opp == "偶" and d % 2 == 0:
+                        score += 1.5
+                        reasons.append(f"偶数反转利好{d}")
+                    elif opp == "奇" and d % 2 == 1:
+                        score += 1.5
+                        reasons.append(f"奇数反转利好{d}")
+                elif feat in ("百位012路", "十位012路", "个位012路") and opp:
+                    if isinstance(opp, list) and d % 3 in opp:
+                        score += 1.0
+                        reasons.append(f"{feat}反转利好{d}路")
+
+            digit_scores[d] = {"score": score, "reasons": reasons}
+
+        ranked = sorted(digit_scores.items(), key=lambda x: -x[1]["score"])
+        schemes = []
+        offsets = [0, 2, 4]
+        for i, offset in enumerate(offsets[:n_schemes]):
+            selected = [d for d, _ in ranked[offset:offset + 7]]
+            if len(selected) < 7:
+                remaining = [d for d, _ in ranked if d not in selected]
+                selected.extend(remaining[:7 - len(selected)])
+            selected = sorted(selected[:7])
+
+            top_reasons = []
+            for d in selected:
+                for reason in digit_scores[d]["reasons"][:1]:
+                    if reason not in top_reasons:
+                        top_reasons.append(reason)
+
+            scheme_reasons = []
+            for s in streaks[:2]:
+                if s["opposite"]:
+                    scheme_reasons.append(f"{s['feature']}连出{s['streak']}期，关注{s['opposite']}")
+            for r in recoveries[:2]:
+                scheme_reasons.append(f"{r['pattern']}遗漏{r['current_missing']}期(理论{r['avg_missing']:.1f}期)")
+
+            schemes.append({
+                "index": i + 1,
+                "digits": selected,
+                "reasons": scheme_reasons[:3],
+                "detail": top_reasons[:5],
+            })
+
+        return schemes
+
+
 def calc_missing(df):
     result = {}
     for digit in range(10):
@@ -776,6 +993,116 @@ with tab3:
             )
 
 with tab4:
+    engine = LotteryPatternEngine(df_feat)
+
+    st.subheader("🔢 号码热度统计")
+    hotness = engine.digit_hotness()
+    hot_df_data = []
+    for d in range(10):
+        hot_df_data.append({
+            "号码": d,
+            "近10期": hotness[10][d],
+            "近30期": hotness[30][d],
+            "近50期": hotness[50][d],
+        })
+    hot_df = pd.DataFrame(hot_df_data)
+    hc1, hc2 = st.columns([2, 3])
+    with hc1:
+        st.dataframe(hot_df, use_container_width=True, hide_index=True)
+    with hc2:
+        fig_hot = go.Figure()
+        for window, color in [(10, "#ff6b6b"), (30, "#4dabf7"), (50, "#6bcb77")]:
+            fig_hot.add_trace(go.Bar(
+                x=list(range(10)),
+                y=[hotness[window][d] for d in range(10)],
+                name=f"近{window}期",
+                marker_color=color,
+                opacity=0.8,
+            ))
+        fig_hot.update_layout(
+            barmode="group",
+            xaxis=dict(dtick=1, title="号码"),
+            yaxis_title="出现次数",
+            height=280,
+            margin=dict(t=20, b=30),
+            legend=dict(orientation="h", y=1.15),
+        )
+        st.plotly_chart(fig_hot, use_container_width=True)
+
+    st.divider()
+    st.subheader("🔥 连出扫描")
+    streaks = engine.streak_scan(min_len=3)
+    if streaks:
+        for s in streaks:
+            opp_text = f"，反转关注【{s['opposite']}】" if s["opposite"] else ""
+            st.markdown(
+                f'<div style="background:linear-gradient(135deg,#2e2e1a,#2e2a16);'
+                f'border-left:4px solid #ffd93d;padding:10px 14px;border-radius:8px;'
+                f'margin:6px 0;font-size:14px;color:#e0e0e0">'
+                f'📊 <b>{s["feature"]}</b> 连续为【{s["value"]}】，已连出 <b>{s["streak"]}</b> 期{opp_text}</div>',
+                unsafe_allow_html=True,
+            )
+    else:
+        st.info("近30期未检测到连续3期以上的特征连出。")
+
+    st.divider()
+    st.subheader("♻️ 遗漏回补分析")
+    recoveries = engine.missing_recovery()
+    rec_df = pd.DataFrame(recoveries)
+    rec_df_display = rec_df[["pattern", "current_missing", "avg_missing", "probability", "is_high_recovery"]].copy()
+    rec_df_display.columns = ["形态", "当前遗漏", "理论遗漏", "理论概率", "高概率回补"]
+    rec_df_display["理论遗漏"] = rec_df_display["理论遗漏"].round(1)
+    rec_df_display["理论概率"] = rec_df_display["理论概率"].apply(lambda x: f"{x:.1%}")
+    rec_df_display["高概率回补"] = rec_df_display["高概率回补"].map({True: "✅ 是", False: ""})
+
+    def _highlight_recovery(val):
+        if val == "✅ 是":
+            return "background-color: #2e4a2e; color: #6bcb77; font-weight: bold"
+        return ""
+
+    styled = rec_df_display.style.applymap(_highlight_recovery, subset=["高概率回补"])
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+    high_rec = [r for r in recoveries if r["is_high_recovery"]]
+    if high_rec:
+        st.markdown("**🚨 高概率回补形态：**")
+        for r in high_rec:
+            st.markdown(
+                f'<div style="background:linear-gradient(135deg,#1a2e1a,#162e16);'
+                f'border-left:4px solid #6bcb77;padding:10px 14px;border-radius:8px;'
+                f'margin:6px 0;font-size:14px;color:#e0e0e0">'
+                f'♻️ <b>{r["pattern"]}</b>：当前遗漏 <b>{r["current_missing"]}</b> 期，'
+                f'理论遗漏 {r["avg_missing"]:.1f} 期（{r["current_missing"] / r["avg_missing"]:.1f}倍），'
+                f'回补概率极高</div>',
+                unsafe_allow_html=True,
+            )
+
+    st.divider()
+    st.subheader("🎯 7码推荐方案")
+    schemes = engine.generate_schemes(n_schemes=3)
+    scheme_cols = st.columns(3)
+    for i, scheme in enumerate(schemes):
+        with scheme_cols[i]:
+            digits_str = " ".join(map(str, scheme["digits"]))
+            st.markdown(
+                f'<div style="text-align:center;padding:20px;background:linear-gradient(135deg,#1a1a2e,#0f3460);'
+                f'border-radius:12px;border:1px solid #4dabf7">'
+                f'<div style="color:#4dabf7;font-size:13px;margin-bottom:10px">方案 {scheme["index"]}</div>'
+                f'<div style="font-size:36px;font-weight:bold;color:#fff;letter-spacing:8px">'
+                f'{digits_str}</div></div>',
+                unsafe_allow_html=True,
+            )
+            if scheme["reasons"]:
+                st.markdown(
+                    f'<div style="font-size:12px;color:#aaa;margin-top:8px;padding:0 4px">'
+                    f'{"<br/>".join(scheme["reasons"])}</div>',
+                    unsafe_allow_html=True,
+                )
+            with st.expander("详细依据"):
+                for detail in scheme["detail"]:
+                    st.markdown(f"- {detail}")
+
+    st.divider()
     recs, warns = expert_decision_engine(df_feat)
 
     col_rec, col_warn = st.columns(2)
