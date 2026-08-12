@@ -862,6 +862,134 @@ if zu3_missing is not None and zu3_avg is not None and zu3_missing > zu3_avg:
 
 st.title("🎲 福彩3D 智能分析平台")
 
+with st.sidebar:
+    st.header("🤖 我的决策助手")
+
+    engine_sb = LotteryPatternEngine(df)
+    hotness_sb = engine_sb.digit_hotness()
+    missing_sb = calc_missing(df)
+    streaks_sb = engine_sb.streak_scan(min_len=3)
+
+    digit_kill_score_sb = {}
+    for d in range(10):
+        ks = 0.0
+        freq = hotness_sb[30].get(d, 0)
+        if freq <= 5:
+            ks += 3.0
+        miss = missing_sb.get(d, 0)
+        if miss == 0:
+            ks += 1.0
+        for s in streaks_sb:
+            if s["feature"] == "和尾大小" and s["opposite"]:
+                if s["opposite"] == "小" and d >= 5:
+                    ks += 2.0
+                elif s["opposite"] == "大" and d < 5:
+                    ks += 2.0
+            if s["feature"] == "和值奇偶" and s["opposite"]:
+                if s["opposite"] == "偶" and d % 2 == 1:
+                    ks += 1.5
+                elif s["opposite"] == "奇" and d % 2 == 0:
+                    ks += 1.5
+        digit_kill_score_sb[d] = ks
+
+    kill_sb = sorted(range(10), key=lambda d: -digit_kill_score_sb[d])[:2]
+    core_sb = sorted(range(10), key=lambda d: digit_kill_score_sb[d])[:2]
+
+    st.subheader("🎯 今日推荐胆码")
+    core_c1, core_c2 = st.columns(2)
+    core_c1.markdown(
+        f'<div style="text-align:center;padding:14px;background:linear-gradient(135deg,#1a2e1a,#0f4f0f);'
+        f'border-radius:10px;border:2px solid #6bcb77">'
+        f'<div style="color:#6bcb77;font-size:11px">胆码1</div>'
+        f'<div style="font-size:36px;font-weight:bold;color:#6bcb77">{core_sb[0]}</div></div>',
+        unsafe_allow_html=True,
+    )
+    core_c2.markdown(
+        f'<div style="text-align:center;padding:14px;background:linear-gradient(135deg,#1a2e1a,#0f4f0f);'
+        f'border-radius:10px;border:2px solid #6bcb77">'
+        f'<div style="color:#6bcb77;font-size:11px">胆码2</div>'
+        f'<div style="font-size:36px;font-weight:bold;color:#6bcb77">{core_sb[1]}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    st.subheader("🚫 参考杀号")
+    kill_c1, kill_c2 = st.columns(2)
+    kill_c1.markdown(
+        f'<div style="text-align:center;padding:14px;background:linear-gradient(135deg,#2e1a1a,#4f0f0f);'
+        f'border-radius:10px;border:2px solid #ff6b6b">'
+        f'<div style="color:#ff6b6b;font-size:11px">杀号1</div>'
+        f'<div style="font-size:36px;font-weight:bold;color:#ff6b6b">{kill_sb[0]}</div></div>',
+        unsafe_allow_html=True,
+    )
+    kill_c2.markdown(
+        f'<div style="text-align:center;padding:14px;background:linear-gradient(135deg,#2e1a1a,#4f0f0f);'
+        f'border-radius:10px;border:2px solid #ff6b6b">'
+        f'<div style="color:#ff6b6b;font-size:11px">杀号2</div>'
+        f'<div style="font-size:36px;font-weight:bold;color:#ff6b6b">{kill_sb[1]}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    backtest_n = min(50, len(df))
+    backtest_df = df.tail(backtest_n)
+    core_hits = 0
+    kill_success = 0
+    for _, r in backtest_df.iterrows():
+        draw_set = {r["num1"], r["num2"], r["num3"]}
+        if any(d in draw_set for d in core_sb):
+            core_hits += 1
+        if not any(d in draw_set for d in kill_sb):
+            kill_success += 1
+    st.caption(
+        f"📊 历史统计：近{backtest_n}期胆码命中{core_hits}次({core_hits / backtest_n:.0%})，"
+        f"杀号成功排除{kill_success}次({kill_success / backtest_n:.0%})"
+    )
+
+    st.divider()
+    st.subheader("📝 意向码输入")
+    input_c1, input_c2, input_c3 = st.columns(3)
+    with input_c1:
+        sb_n1 = st.selectbox("百位", list(range(10)), key="sb_n1")
+    with input_c2:
+        sb_n2 = st.selectbox("十位", list(range(10)), key="sb_n2")
+    with input_c3:
+        sb_n3 = st.selectbox("个位", list(range(10)), key="sb_n3")
+
+    eval_clicked = st.button("🚀 立即测评", use_container_width=True, type="primary", key="sb_eval")
+
+    if eval_clicked:
+        result_sb = evaluate_user_numbers([sb_n1, sb_n2, sb_n3], df_feat)
+        score_sb = result_sb["score"]
+        score_color_sb = "#6bcb77" if score_sb >= 65 else "#ffd93d" if score_sb >= 50 else "#ff6b6b"
+
+        st.markdown(
+            f'<div style="text-align:center;padding:16px;background:linear-gradient(135deg,#1a1a2e,#0f3460);'
+            f'border-radius:12px;border:2px solid {score_color_sb};margin:8px 0">'
+            f'<div style="font-size:12px;color:#aaa">推荐指数</div>'
+            f'<div style="font-size:48px;font-weight:bold;color:{score_color_sb}">{score_sb}<span style="font-size:16px;color:#aaa">/100</span></div>'
+            f'<div style="font-size:16px;color:{score_color_sb}">{result_sb["verdict"]}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        st.progress(score_sb / 100.0)
+
+        with st.expander("📋 专家测评解释", expanded=True):
+            st.markdown(f"**💬 {result_sb['explanation']}**")
+            st.divider()
+            for detail in result_sb["details"]:
+                icon = "✅" if any(kw in detail for kw in ["高频", "全占", "热号", "回补", "较佳", "活跃"]) else "⚠️" if any(kw in detail for kw in ["中频", "缺", "温号", "一般", "偏多"]) else "❌"
+                st.markdown(f"{icon} {detail}")
+
+        if any(d in kill_sb for d in [sb_n1, sb_n2, sb_n3]):
+            hit_k = [d for d in [sb_n1, sb_n2, sb_n3] if d in kill_sb]
+            st.warning(f"⚠️ 您的意向码包含当前杀号 {hit_k}，建议替换！")
+        if any(d in core_sb for d in [sb_n1, sb_n2, sb_n3]):
+            hit_c = [d for d in [sb_n1, sb_n2, sb_n3] if d in core_sb]
+            st.success(f"✅ 您的意向码包含推荐胆码 {hit_c}，选择合理！")
+
+    st.divider()
+    st.caption("⚠️ 仅供参考，不构成投注建议")
+
 tab1, tab2, tab3, tab4 = st.tabs(["📊 数据总览", "📈 走势统计", "🎯 策略回测", "🧭 专家决策看板"])
 
 df_feat = extract_features(df)
