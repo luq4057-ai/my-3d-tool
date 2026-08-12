@@ -210,6 +210,127 @@ def pattern_recognition_engine(df, window=20, min_streak=4):
     return findings
 
 
+def expert_decision_engine(df_feat):
+    recent = df_feat.tail(30).reset_index(drop=True)
+    last = recent.iloc[-1]
+    recommendations = []
+    warnings = []
+
+    missing = calc_missing(df_feat)
+    hotness = calc_hotness(df_feat, 30)
+    total = len(df_feat)
+    theoretical_avg = total / 10.0
+
+    hot_digits = []
+    for d in range(10):
+        if missing[d] > theoretical_avg * 3:
+            hot_digits.append((d, missing[d]))
+
+    if hot_digits:
+        hot_digits.sort(key=lambda x: -x[1])
+        digits_str = "、".join([f"{d}(漏{m}期)" for d, m in hot_digits[:5]])
+        recommendations.append(f"🔥 回补号：{digits_str}，遗漏超3倍理论值，回补概率极高")
+
+    zu3_miss = calc_zu3_missing(df_feat)
+    zu3_avg = calc_zu3_avg_interval(df_feat)
+    if zu3_avg and zu3_miss > zu3_avg * 3:
+        recommendations.append(f"⚠️ 组三回补：组三已遗漏{zu3_miss}期，超平均间隔{zu3_avg:.1f}期的3倍，强烈关注组三形态")
+
+    findings = pattern_recognition_engine(df_feat, window=20, min_streak=3)
+    for f in findings:
+        if f.startswith("规律：") and "建议下期关注" in f:
+            recommendations.append(f"📈 惯性反转：{f}")
+        elif f.startswith("关联：") and "建议本期关注" in f:
+            recommendations.append(f"🔗 关联预测：{f}")
+
+    cross_rules = [
+        {"name": "上期(十位+个位)和尾→本期百位", "calc": lambda r: (r["num2"] + r["num3"]) % 10, "target": "百位"},
+        {"name": "上期(百位+个位)和尾→本期十位", "calc": lambda r: (r["num1"] + r["num3"]) % 10, "target": "十位"},
+        {"name": "上期(百位+十位)和尾→本期个位", "calc": lambda r: (r["num1"] + r["num2"]) % 10, "target": "个位"},
+    ]
+    for rule in cross_rules:
+        try:
+            pred_val = rule["calc"](last)
+            recommendations.append(f"🎯 关联推演：{rule['name']}={pred_val}，本期{rule['target']}建议包含 {pred_val}")
+        except (KeyError, TypeError):
+            pass
+
+    cold_digits = [d for d in range(10) if hotness[d] <= 5]
+    if cold_digits:
+        cold_str = "、".join([str(d) for d in cold_digits])
+        warnings.append(f"🧊 极冷号：{cold_str}，近30期仅出现≤5次，下期出现概率低")
+
+    extreme_sums = list(range(0, 4)) + list(range(24, 28))
+    if last["sum_val"] <= 6:
+        warnings.append(f"❄️ 极端和值：上期和值={last['sum_val']}，和值≤6或≥21出现概率极低，下期大概率回归10-18区间")
+
+    if last["sum_tail_size"] == "大":
+        streak = 0
+        for v in recent["sum_tail_size"].iloc[::-1]:
+            if v == "大":
+                streak += 1
+            else:
+                break
+        if streak >= 5:
+            warnings.append(f"🚫 和尾大已连出{streak}期，继续出大的概率骤降，建议排除和尾5-9的组合")
+
+    if last["sum_tail_size"] == "小":
+        streak = 0
+        for v in recent["sum_tail_size"].iloc[::-1]:
+            if v == "小":
+                streak += 1
+            else:
+                break
+        if streak >= 5:
+            warnings.append(f"🚫 和尾小已连出{streak}期，继续出小的概率骤降，建议排除和尾0-4的组合")
+
+    warnings.append(f"🚫 豹子形态：出现概率仅1%，下期排除豹子(三同号)组合")
+
+    if last["span"] >= 8:
+        warnings.append(f"🚫 极端跨度：上期跨度={last['span']}，跨度≥8为小概率事件，下期大概率回落至3-7区间")
+
+    return recommendations, warnings
+
+
+def build_pattern_chain_chart(df_feat, n_periods=5):
+    recent = df_feat.tail(n_periods).reset_index(drop=True)
+    fig = go.Figure()
+
+    features = [
+        {"col": "num1", "name": "百位", "color": "#ff6b6b", "dash": "solid"},
+        {"col": "num2", "name": "十位", "color": "#4dabf7", "dash": "solid"},
+        {"col": "num3", "name": "个位", "color": "#6bcb77", "dash": "solid"},
+        {"col": "sum_tail", "name": "和尾", "color": "#ffd93d", "dash": "dot"},
+        {"col": "span", "name": "跨度", "color": "#cc5de8", "dash": "dash"},
+    ]
+
+    for feat in features:
+        fig.add_trace(
+            go.Scatter(
+                x=recent["period"],
+                y=recent[feat["col"]],
+                mode="lines+markers+text",
+                name=feat["name"],
+                line=dict(color=feat["color"], width=2.5, dash=feat["dash"]),
+                marker=dict(size=10, symbol="circle"),
+                text=recent[feat["col"]].astype(str),
+                textposition="top center",
+                textfont=dict(size=12, color=feat["color"]),
+            )
+        )
+
+    fig.update_layout(
+        xaxis_title="期号",
+        yaxis_title="数值",
+        yaxis=dict(dtick=1, range=[-0.5, 10]),
+        height=400,
+        margin=dict(t=30, b=30),
+        legend=dict(orientation="h", y=1.12, font=dict(size=11)),
+        hovermode="x unified",
+    )
+    return fig
+
+
 def calc_missing(df):
     result = {}
     for digit in range(10):
@@ -347,7 +468,7 @@ if zu3_missing is not None and zu3_avg is not None and zu3_missing > zu3_avg:
 
 st.title("🎲 福彩3D 智能分析平台")
 
-tab1, tab2, tab3 = st.tabs(["📊 数据总览", "📈 走势统计", "🎯 策略回测"])
+tab1, tab2, tab3, tab4 = st.tabs(["📊 数据总览", "📈 走势统计", "🎯 策略回测", "🧭 专家决策看板"])
 
 df_feat = extract_features(df)
 
@@ -653,3 +774,108 @@ with tab3:
                 f"回报率 {best['roi']:+.2f}%  |  "
                 f"净盈亏 {best['net_profit']:+,.1f}元"
             )
+
+with tab4:
+    recs, warns = expert_decision_engine(df_feat)
+
+    col_rec, col_warn = st.columns(2)
+
+    with col_rec:
+        st.subheader("🎯 高胜率推荐")
+        if recs:
+            for i, r in enumerate(recs, 1):
+                st.markdown(
+                    f'<div style="background:linear-gradient(135deg,#1a2e1a,#162e16);'
+                    f'border-left:4px solid #6bcb77;padding:12px 16px;border-radius:8px;'
+                    f'margin:8px 0;font-size:14px;color:#e0e0e0">'
+                    f'<b style="color:#6bcb77">推荐{i}</b><br/>{r}</div>',
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.info("暂无高置信度推荐，数据较为随机。")
+
+        st.divider()
+        st.subheader("📊 号码推荐汇总")
+        last_row = df_feat.iloc[-1]
+        pred_bai = (last_row["num2"] + last_row["num3"]) % 10
+        pred_shi = (last_row["num1"] + last_row["num3"]) % 10
+        pred_ge = (last_row["num1"] + last_row["num2"]) % 10
+
+        miss_sorted = sorted(range(10), key=lambda d: -calc_missing(df_feat)[d])
+        top_miss = miss_sorted[:5]
+
+        rec_bai = sorted(set([pred_bai] + [d for d in top_miss[:3]]))
+        rec_shi = sorted(set([pred_shi] + [d for d in top_miss[2:5]]))
+        rec_ge = sorted(set([pred_ge] + [d for d in top_miss[1:4]]))
+
+        c1, c2, c3 = st.columns(3)
+        c1.markdown(
+            f'<div style="text-align:center;padding:16px;background:#1a1a2e;border-radius:10px">'
+            f'<div style="color:#ff6b6b;font-size:13px;margin-bottom:8px">百位推荐</div>'
+            f'<div style="font-size:28px;font-weight:bold;color:#ff6b6b;letter-spacing:6px">'
+            f'{" ".join(map(str, rec_bai))}</div></div>',
+            unsafe_allow_html=True,
+        )
+        c2.markdown(
+            f'<div style="text-align:center;padding:16px;background:#1a1a2e;border-radius:10px">'
+            f'<div style="color:#4dabf7;font-size:13px;margin-bottom:8px">十位推荐</div>'
+            f'<div style="font-size:28px;font-weight:bold;color:#4dabf7;letter-spacing:6px">'
+            f'{" ".join(map(str, rec_shi))}</div></div>',
+            unsafe_allow_html=True,
+        )
+        c3.markdown(
+            f'<div style="text-align:center;padding:16px;background:#1a1a2e;border-radius:10px">'
+            f'<div style="color:#6bcb77;font-size:13px;margin-bottom:8px">个位推荐</div>'
+            f'<div style="font-size:28px;font-weight:bold;color:#6bcb77;letter-spacing:6px">'
+            f'{" ".join(map(str, rec_ge))}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    with col_warn:
+        st.subheader("⚡ 避雷针 · 垃圾组合剔除")
+        if warns:
+            for i, w in enumerate(warns, 1):
+                st.markdown(
+                    f'<div style="background:linear-gradient(135deg,#2e1a1a,#2e1616);'
+                    f'border-left:4px solid #ff6b6b;padding:12px 16px;border-radius:8px;'
+                    f'margin:8px 0;font-size:14px;color:#e0e0e0">'
+                    f'<b style="color:#ff6b6b">避雷{i}</b><br/>{w}</div>',
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.info("暂无明确避雷信号。")
+
+        st.divider()
+        st.subheader("🚫 排除号码汇总")
+        hotness = calc_hotness(df_feat, 30)
+        cold_digits = sorted([d for d in range(10) if hotness[d] <= 5])
+        exclude_str = "、".join(map(str, cold_digits)) if cold_digits else "无"
+        st.markdown(
+            f'<div style="text-align:center;padding:16px;background:#2e1a1a;border-radius:10px">'
+            f'<div style="color:#ff6b6b;font-size:13px;margin-bottom:8px">极冷号（近30期≤5次）</div>'
+            f'<div style="font-size:28px;font-weight:bold;color:#ff6b6b;letter-spacing:6px">'
+            f'{exclude_str}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+    st.subheader("🔗 近5期规律链路图")
+    fig_chain = build_pattern_chain_chart(df_feat, n_periods=5)
+    st.plotly_chart(fig_chain, use_container_width=True)
+
+    last5 = df_feat.tail(5).iloc[::-1]
+    chain_data = []
+    for _, r in last5.iterrows():
+        chain_data.append({
+            "期号": r["period"],
+            "日期": r["draw_date"],
+            "号码": f'{r["num1"]}{r["num2"]}{r["num3"]}',
+            "和尾": r["sum_tail"],
+            "和尾大小": r["sum_tail_size"],
+            "012路": f'{r["road1"]}{r["road2"]}{r["road3"]}',
+            "跨度": r["span"],
+            "邻孤传": r["lgc"],
+        })
+    st.dataframe(pd.DataFrame(chain_data), use_container_width=True, hide_index=True)
+
+    st.caption("⚠️ 以上分析基于历史数据统计规律，仅供参考，不构成投注建议。彩票开奖为随机事件。")
