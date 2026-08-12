@@ -2,75 +2,14 @@ import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 from math import comb
-from datetime import datetime, timedelta
+from datetime import datetime
 import re
-import time
-import os
 import sqlite3
-import json
 
-import requests
-import urllib3
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+MULTIPLIERS = {5: 15.0, 6: 7.5, 7: 4.3}
 
 DB_FILE = "lottery_data.db"
 TABLE_NAME = "history3d"
-
-API_SOURCES = [
-    {
-        "name": "福彩官方API",
-        "url": "https://www.cwl.gov.cn/cwl_admin/front/cwlkj/search/kjxx/findDrawNotice",
-        "params": {
-            "name": "3d",
-            "issueCount": "",
-            "issueStart": "",
-            "issueEnd": "",
-            "dayStart": "",
-            "dayEnd": "",
-            "pageNo": 1,
-            "pageSize": 100,
-            "systemType": "PC",
-        },
-        "headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Referer": "https://www.cwl.gov.cn/ygkj/wqkj/sd/",
-            "X-Requested-With": "XMLHttpRequest",
-            "Connection": "keep-alive",
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-origin",
-        },
-        "type": "cwl",
-    },
-    {
-        "name": "体彩API",
-        "url": "https://webapi.sporttery.cn/gateway/lottery/getHistoryPageListV1.qry",
-        "params": {
-            "gameNo": "3d",
-            "provinceId": "0",
-            "pageSize": "100",
-            "is498": "true",
-            "pageNo": 1,
-        },
-        "headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Referer": "https://www.sporttery.cn/jc/jsq/dlt/",
-            "Connection": "keep-alive",
-        },
-        "type": "sporttery",
-    },
-]
-
-TIMEOUT = 10
-MAX_RETRIES = 3
-
-MULTIPLIERS = {5: 15.0, 6: 7.5, 7: 4.3}
 
 st.set_page_config(page_title="福彩3D 智能分析", layout="wide")
 
@@ -83,214 +22,21 @@ def determine_pattern(n1, n2, n3):
     return "组六"
 
 
-def fetch_json_with_retry(session, url, params=None, max_retries=MAX_RETRIES):
-    last_status = None
-    last_error = None
-    for attempt in range(1, max_retries + 1):
-        try:
-            resp = session.get(url, params=params, timeout=TIMEOUT, verify=False)
-            last_status = resp.status_code
-            if resp.status_code == 200:
-                try:
-                    data = resp.json()
-                    return data, None
-                except (json.JSONDecodeError, ValueError) as e:
-                    last_error = f"JSON解析失败: {str(e)}"
-            elif resp.status_code == 403:
-                last_error = f"HTTP 403"
-                time.sleep(3)
-            elif resp.status_code == 429:
-                last_error = f"HTTP 429"
-                time.sleep(5)
-            else:
-                last_error = f"HTTP {resp.status_code}"
-                time.sleep(2)
-        except requests.RequestException as e:
-            last_error = str(e)
-            if attempt < max_retries:
-                time.sleep(min(attempt * 3, 15))
-    return None, last_error
-
-
-def parse_cwl_data(data):
-    results = []
-    try:
-        rows = data.get("result", [])
-        if not rows:
-            return results
-        for item in rows:
-            code = item.get("code", "")
-            if not re.match(r"^\d{5,}$", code):
-                continue
-            red = item.get("red", "")
-            digits = red.split()
-            if len(digits) < 3:
-                digits = list(red)
-            if len(digits) < 3:
-                continue
-            n1, n2, n3 = int(digits[0]), int(digits[1]), int(digits[2])
-            date_str = item.get("date", "")
-            draw_date = normalize_date(date_str) if date_str else ""
-            pattern = determine_pattern(n1, n2, n3)
-            results.append({
-                "period": code,
-                "num1": n1,
-                "num2": n2,
-                "num3": n3,
-                "pattern": pattern,
-                "draw_date": draw_date,
-            })
-    except Exception:
-        pass
-    return results
-
-
-def parse_sporttery_data(data):
-    results = []
-    try:
-        columns = data.get("columns", "")
-        rows_str = data.get("rows", "")
-        if not rows_str:
-            return results
-        col_list = columns.split(",")
-        rows = rows_str.split(";")
-        for row_str in rows:
-            if not row_str.strip():
-                continue
-            vals = row_str.split(",")
-            row_dict = dict(zip(col_list, vals))
-            period = row_dict.get("issue", "")
-            if not re.match(r"^\d{5,}$", period):
-                continue
-            nums = row_dict.get("lotteryDrawResult", "")
-            digits = nums.split()
-            if len(digits) < 3:
-                digits = list(nums)
-            if len(digits) < 3:
-                continue
-            n1, n2, n3 = int(digits[0]), int(digits[1]), int(digits[2])
-            date_str = row_dict.get("lotteryDrawTime", "")
-            draw_date = normalize_date(date_str) if date_str else ""
-            pattern = determine_pattern(n1, n2, n3)
-            results.append({
-                "period": period,
-                "num1": n1,
-                "num2": n2,
-                "num3": n3,
-                "pattern": pattern,
-                "draw_date": draw_date,
-            })
-    except Exception:
-        pass
-    return results
-
-
-def normalize_date(raw):
-    raw = str(raw).strip()
-    m = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})", raw)
-    if m:
-        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
-    m = re.match(r"(\d{4})/(\d{1,2})/(\d{1,2})", raw)
-    if m:
-        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
-    m = re.match(r"(\d{4})年(\d{1,2})月(\d{1,2})日", raw)
-    if m:
-        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
-    return raw
-
-
 @st.cache_resource(ttl=1800)
 def load_records():
-    """智能加载数据：优先在线抓取，失败则回退本地数据库"""
-    # 方案1：优先从网络实时抓取
-    df, error_msg, status_codes = fetch_from_web()
-    if not df.empty:
-        return df, False, None
-
-    # 方案2：网络抓取失败，回退本地数据库
     try:
-        if os.path.exists(DB_FILE):
-            conn = sqlite3.connect(DB_FILE)
-            df = pd.read_sql_query(
-                f"SELECT period, num1, num2, num3, pattern, draw_date "
-                f"FROM {TABLE_NAME} ORDER BY period ASC",
-                conn,
-            )
-            conn.close()
-            if not df.empty:
-                return df, True, {"error": error_msg, "status_codes": status_codes}
+        conn = sqlite3.connect(DB_FILE)
+        df = pd.read_sql_query(
+            f"SELECT period, num1, num2, num3, pattern, draw_date "
+            f"FROM {TABLE_NAME} ORDER BY period ASC",
+            conn,
+        )
+        conn.close()
+        if not df.empty:
+            return df
     except Exception:
         pass
-
-    # 方案3：所有方式都失败
-    return pd.DataFrame(), False, {"error": error_msg, "status_codes": status_codes}
-
-
-@st.cache_data(ttl=3600)
-def fetch_from_web():
-    """从多API源抓取近一年数据，返回 DataFrame, error_msg, status_codes"""
-    cutoff = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
-    all_status_codes = []
-
-    for source in API_SOURCES:
-        try:
-            session = requests.Session()
-            session.trust_env = False
-            session.headers.update(source["headers"])
-
-            all_records = []
-            page = 1
-            should_continue = True
-
-            progress_bar = st.progress(0, text=f"🕷️ 正在从 {source['name']} 抓取数据...")
-            status_text = st.empty()
-
-            while should_continue:
-                status_text.text(f"正在抓取第 {page} 页...")
-                params = dict(source["params"])
-                params["pageNo"] = page
-
-                data, error = fetch_json_with_retry(session, source["url"], params=params)
-
-                if data is None:
-                    if error:
-                        all_status_codes.append(f"{source['name']}: {error}")
-                    break
-
-                if source["type"] == "cwl":
-                    records = parse_cwl_data(data)
-                elif source["type"] == "sporttery":
-                    records = parse_sporttery_data(data)
-                else:
-                    records = []
-
-                if not records:
-                    break
-
-                for rec in records:
-                    if rec["draw_date"] and rec["draw_date"] < cutoff:
-                        should_continue = False
-                        break
-                    all_records.append(rec)
-
-                progress_bar.progress(min(page * 10, 90), text=f"已从 {source['name']} 抓取 {len(all_records)} 期数据...")
-                page += 1
-                time.sleep(0.3)
-
-            progress_bar.empty()
-            status_text.empty()
-
-            if all_records:
-                df = pd.DataFrame(all_records)
-                df = df.drop_duplicates(subset=["period"], keep="first")
-                df = df.sort_values("period", ascending=True).reset_index(drop=True)
-                return df, None, all_status_codes
-
-        except Exception as e:
-            all_status_codes.append(f"{source['name']}: {str(e)}")
-            continue
-
-    return pd.DataFrame(), "所有数据源均失败", all_status_codes
+    return pd.DataFrame()
 
 
 def calc_missing(df):
@@ -392,49 +138,23 @@ def simulate_group(df, digits):
     }
 
 
-df, is_offline, error_info = load_records()
+df = load_records()
 
 if df.empty:
-    st.error("❌ 无法获取数据")
-    status_detail = ""
-    if error_info:
-        status_detail = f"\n\n**HTTP 状态码详情：**\n"
-        for code in error_info.get("status_codes", []):
-            status_detail += f"- {code}\n"
-        status_detail += f"\n**错误信息：** {error_info.get('error', '未知错误')}"
+    st.error("❌ 无法加载数据")
+    st.warning("""
+    **数据库中暂无数据。**
     
-    st.warning(f"""
-    **可能的原因：**
-    1. 官网服务器暂时不可用
-    2. 网络连接不稳定
-    3. 请求频率过高被限制
-    {status_detail}
+    数据由 GitHub Actions 每天自动更新。如果刚部署，请手动触发一次更新：
     
-    **解决方案：**
-    - 等待 1-2 分钟后点击右下角"↻ Rerun"刷新页面
-    - 检查本地是否有 `lottery_data.db` 文件
-    - 在本地运行 `python scraper_3d.py --full` 抓取数据
+    1. 进入仓库 → **Actions** → **Daily 3D Lottery Data Update**
+    2. 点击 **Run workflow** 按钮
+    3. 等待运行完成后刷新本页面
     """)
-    
-    if st.button("🔄 重新尝试加载数据"):
-        st.cache_resource.clear()
-        st.cache_data.clear()
-        st.rerun()
-    
     st.stop()
 
-if is_offline:
-    offline_detail = ""
-    if error_info:
-        codes = error_info.get("status_codes", [])
-        if codes:
-            offline_detail = f"\n\n**网络抓取失败详情：**\n"
-            for code in codes:
-                offline_detail += f"- {code}\n"
-        err = error_info.get("error", "")
-        if err:
-            offline_detail += f"\n**错误信息：** {err}"
-    st.warning(f"⚠️ 当前为离线数据，实时更新暂时受阻。显示的是本地数据库中的历史数据。{offline_detail}")
+latest_date = df["draw_date"].max()
+st.caption(f"📅 数据更新至: {latest_date}  |  共 {len(df)} 期  |  由 GitHub Actions 自动更新")
 
 zu3_missing = calc_zu3_missing(df)
 zu3_avg = calc_zu3_avg_interval(df)
