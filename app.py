@@ -39,6 +39,44 @@ def load_records():
     return pd.DataFrame()
 
 
+def extract_features(df):
+    df = df.copy()
+
+    df["sum_val"] = df["num1"] + df["num2"] + df["num3"]
+    df["sum_tail"] = df["sum_val"] % 10
+    df["sum_tail_size"] = df["sum_tail"].apply(lambda x: "大" if x >= 5 else "小")
+
+    df["road1"] = df["num1"] % 3
+    df["road2"] = df["num2"] % 3
+    df["road3"] = df["num3"] % 3
+    df["sum_road"] = df["sum_val"] % 3
+
+    df["span"] = df[["num1", "num2", "num3"]].max(axis=1) - df[["num1", "num2", "num3"]].min(axis=1)
+
+    def _classify(d, prev_set):
+        if d in prev_set:
+            return "传"
+        for p in prev_set:
+            if abs(d - p) == 1 or abs(d - p) == 9:
+                return "邻"
+        return "孤"
+
+    lgc_list = []
+    prev_set = None
+    for _, row in df.iterrows():
+        if prev_set is None:
+            lgc_list.append("—")
+        else:
+            cur = [row["num1"], row["num2"], row["num3"]]
+            tags = [_classify(d, prev_set) for d in cur]
+            c, l, g = tags.count("传"), tags.count("邻"), tags.count("孤")
+            lgc_list.append(f"{c}传{l}邻{g}孤")
+        prev_set = {row["num1"], row["num2"], row["num3"]}
+    df["lgc"] = lgc_list
+
+    return df
+
+
 def calc_missing(df):
     result = {}
     for digit in range(10):
@@ -178,9 +216,11 @@ st.title("🎲 福彩3D 智能分析平台")
 
 tab1, tab2, tab3 = st.tabs(["📊 数据总览", "📈 走势统计", "🎯 策略回测"])
 
+df_feat = extract_features(df)
+
 with tab1:
     st.subheader("最近 10 期开奖数据")
-    recent = df.tail(10).iloc[::-1].reset_index(drop=True)
+    recent = df_feat.tail(10).iloc[::-1].reset_index(drop=True)
     display_df = recent.copy()
     display_df["中奖号码"] = display_df.apply(
         lambda r: f"{r['num1']} {r['num2']} {r['num3']}", axis=1
@@ -188,8 +228,17 @@ with tab1:
     display_df["形态"] = display_df["pattern"].map(
         {"组六": "🔵 组六", "组三": "🟡 组三", "豹子": "🔴 豹子"}
     )
-    show_cols = ["period", "draw_date", "中奖号码", "形态"]
-    show_cols_renamed = ["期号", "开奖日期", "中奖号码", "形态"]
+    display_df["和值/和尾"] = display_df.apply(
+        lambda r: f"{r['sum_val']}/{r['sum_tail']}", axis=1
+    )
+    display_df["和尾大小"] = display_df["sum_tail_size"]
+    display_df["012路"] = display_df.apply(
+        lambda r: f"{r['road1']}{r['road2']}{r['road3']}(和{r['sum_road']})", axis=1
+    )
+    display_df["跨度"] = display_df["span"]
+    display_df["邻孤传"] = display_df["lgc"]
+    show_cols = ["period", "draw_date", "中奖号码", "形态", "和值/和尾", "和尾大小", "012路", "跨度", "邻孤传"]
+    show_cols_renamed = ["期号", "开奖日期", "中奖号码", "形态", "和值/和尾", "和尾大小", "012路", "跨度", "邻孤传"]
     show_df = display_df[show_cols].rename(
         columns=dict(zip(show_cols, show_cols_renamed))
     )
@@ -198,12 +247,6 @@ with tab1:
         show_df,
         use_container_width=True,
         hide_index=True,
-        column_config={
-            "期号": st.column_config.TextColumn(width="small"),
-            "开奖日期": st.column_config.TextColumn(width="small"),
-            "中奖号码": st.column_config.TextColumn(width="small"),
-            "形态": st.column_config.TextColumn(width="small"),
-        },
     )
 
     col1, col2, col3, col4 = st.columns(4)
