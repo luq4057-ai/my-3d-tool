@@ -1365,7 +1365,7 @@ with tab4:
             return "background-color: #2e4a2e; color: #6bcb77; font-weight: bold"
         return ""
 
-    styled = rec_df_display.style.applymap(_highlight_recovery, subset=["高概率回补"])
+    styled = rec_df_display.style.map(_highlight_recovery, subset=["高概率回补"])
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
     high_rec = [r for r in recoveries if r["is_high_recovery"]]
