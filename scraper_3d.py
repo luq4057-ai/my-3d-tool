@@ -1,9 +1,9 @@
 import requests
-from bs4 import BeautifulSoup
 import sqlite3
 from datetime import datetime, timedelta
 import time
 import re
+import json
 import urllib3
 import schedule
 import sys
@@ -14,58 +14,53 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 DB_FILE = "lottery_data.db"
 TABLE_NAME = "history3d"
 
-DATA_SOURCES = [
+API_SOURCES = [
     {
-        "name": "中彩网",
-        "url": "http://kaijiang.zhcw.com/zhcw/inc/3d/3d_wqhg.jsp?pageNum={}",
+        "name": "福彩官方API",
+        "url": "https://www.cwl.gov.cn/cwl_admin/front/cwlkj/search/kjxx/findDrawNotice",
+        "params": {
+            "name": "3d",
+            "issueCount": "",
+            "issueStart": "",
+            "issueEnd": "",
+            "dayStart": "",
+            "dayEnd": "",
+            "pageNo": 1,
+            "pageSize": 100,
+            "systemType": "PC",
+        },
         "headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "Accept-Encoding": "gzip, deflate, br",
-            "Referer": "http://kaijiang.zhcw.com/zhcw/html/3d/list_1.html",
+            "Referer": "https://www.cwl.gov.cn/ygkj/wqkj/sd/",
+            "X-Requested-With": "XMLHttpRequest",
             "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-origin",
-            "Sec-Fetch-User": "?1",
-            "Cache-Control": "max-age=0",
         },
+        "type": "cwl",
     },
     {
-        "name": "新浪彩票",
-        "url": "https://history.sina.com.cn/lottery/3d?page={}",
+        "name": "体彩API",
+        "url": "https://webapi.sporttery.cn/gateway/lottery/getHistoryPageListV1.qry",
+        "params": {
+            "gameNo": "3d",
+            "provinceId": "0",
+            "pageSize": "100",
+            "is498": "true",
+            "pageNo": 1,
+        },
         "headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Referer": "https://history.sina.com.cn/lottery/3d",
+            "Referer": "https://www.sporttery.cn/jc/jsq/dlt/",
             "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "same-origin",
-            "Sec-Fetch-User": "?1",
         },
-    },
-    {
-        "name": "网易彩票",
-        "url": "https://lottery.163.com/ssq/3d.html",
-        "headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Referer": "https://lottery.163.com/",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "same-origin",
-            "Sec-Fetch-User": "?1",
-        },
+        "type": "sporttery",
     },
 ]
 
@@ -76,7 +71,7 @@ MAX_RETRIES = 3
 def create_session(source_idx=0):
     session = requests.Session()
     session.trust_env = False
-    session.headers.update(DATA_SOURCES[source_idx]["headers"])
+    session.headers.update(API_SOURCES[source_idx]["headers"])
     return session
 
 
@@ -114,68 +109,94 @@ def period_exists(cursor, period):
     return cursor.fetchone() is not None
 
 
-def fetch_page_with_retry(session, url, max_retries=MAX_RETRIES):
+def fetch_json_with_retry(session, url, params=None, max_retries=MAX_RETRIES):
     last_status = None
     last_error = None
     for attempt in range(1, max_retries + 1):
         try:
-            resp = session.get(url, timeout=TIMEOUT, verify=False)
+            resp = session.get(url, params=params, timeout=TIMEOUT, verify=False)
             last_status = resp.status_code
-            resp.encoding = "utf-8"
             if resp.status_code == 200:
-                return resp.text, None
+                try:
+                    data = resp.json()
+                    return data, None
+                except (json.JSONDecodeError, ValueError) as e:
+                    last_error = f"JSON解析失败: {str(e)}"
             elif resp.status_code == 403:
+                last_error = "HTTP 403"
                 time.sleep(3)
             elif resp.status_code == 429:
+                last_error = "HTTP 429"
                 time.sleep(5)
             else:
+                last_error = f"HTTP {resp.status_code}"
                 time.sleep(2)
         except requests.RequestException as e:
             last_error = str(e)
             if attempt < max_retries:
                 time.sleep(min(attempt * 3, 15))
-    error_msg = f"HTTP {last_status}" if last_status else last_error
-    return None, error_msg
+    return None, last_error
 
 
-def parse_zhcw_page(html):
-    soup = BeautifulSoup(html, "html.parser")
+def parse_cwl_data(data):
     results = []
-
-    table = soup.find("table", class_="wqhgt")
-    if not table:
-        table = soup.find("table")
-    if not table:
-        return results
-
-    all_rows = table.find_all("tr")
-    data_rows = all_rows[2:-1]
-
-    for row in data_rows:
-        tds = row.find_all("td")
-        if len(tds) < 3:
-            continue
-
-        try:
-            raw_date = tds[0].get_text(strip=True)
-            if not re.search(r"\d{4}", raw_date):
+    try:
+        rows = data.get("result", [])
+        if not rows:
+            return results
+        for item in rows:
+            code = item.get("code", "")
+            if not re.match(r"^\d{5,}$", code):
                 continue
-
-            period = tds[1].get_text(strip=True)
-            if not re.match(r"^\d{5,}$", period):
-                continue
-
-            em_tags = tds[2].find_all("em")
-            if em_tags:
-                digits = [em.get_text(strip=True) for em in em_tags]
-            else:
-                digits = re.findall(r"\d", tds[2].get_text(strip=True))
-
+            red = item.get("red", "")
+            digits = red.split()
+            if len(digits) < 3:
+                digits = list(red)
             if len(digits) < 3:
                 continue
-
             n1, n2, n3 = int(digits[0]), int(digits[1]), int(digits[2])
-            draw_date = normalize_date(raw_date)
+            date_str = item.get("date", "")
+            draw_date = normalize_date(date_str) if date_str else ""
+            pattern = determine_pattern(n1, n2, n3)
+            results.append({
+                "period": code,
+                "num1": n1,
+                "num2": n2,
+                "num3": n3,
+                "pattern": pattern,
+                "draw_date": draw_date,
+            })
+    except Exception:
+        pass
+    return results
+
+
+def parse_sporttery_data(data):
+    results = []
+    try:
+        columns = data.get("columns", "")
+        rows_str = data.get("rows", "")
+        if not rows_str:
+            return results
+        col_list = columns.split(",")
+        rows = rows_str.split(";")
+        for row_str in rows:
+            if not row_str.strip():
+                continue
+            vals = row_str.split(",")
+            row_dict = dict(zip(col_list, vals))
+            period = row_dict.get("issue", "")
+            if not re.match(r"^\d{5,}$", period):
+                continue
+            nums = row_dict.get("lotteryDrawResult", "")
+            digits = nums.split()
+            if len(digits) < 3:
+                digits = list(nums)
+            if len(digits) < 3:
+                continue
+            n1, n2, n3 = int(digits[0]), int(digits[1]), int(digits[2])
+            date_str = row_dict.get("lotteryDrawTime", "")
+            draw_date = normalize_date(date_str) if date_str else ""
             pattern = determine_pattern(n1, n2, n3)
             results.append({
                 "period": period,
@@ -185,104 +206,13 @@ def parse_zhcw_page(html):
                 "pattern": pattern,
                 "draw_date": draw_date,
             })
-        except (ValueError, IndexError):
-            continue
-
-    return results
-
-
-def parse_sina_page(html):
-    soup = BeautifulSoup(html, "html.parser")
-    results = []
-
-    table = soup.find("table")
-    if not table:
-        return results
-
-    for row in table.find_all("tr"):
-        tds = row.find_all("td")
-        if len(tds) < 4:
-            continue
-
-        try:
-            period = tds[0].get_text(strip=True)
-            if not re.match(r"^\d{5,}$", period):
-                continue
-
-            raw_date = tds[1].get_text(strip=True)
-            digits = re.findall(r"\d", tds[2].get_text(strip=True))
-            if len(digits) < 3:
-                continue
-
-            n1, n2, n3 = int(digits[0]), int(digits[1]), int(digits[2])
-            draw_date = normalize_date(raw_date)
-            pattern = determine_pattern(n1, n2, n3)
-            results.append({
-                "period": period,
-                "num1": n1,
-                "num2": n2,
-                "num3": n3,
-                "pattern": pattern,
-                "draw_date": draw_date,
-            })
-        except (ValueError, IndexError):
-            continue
-
-    return results
-
-
-def parse_163_page(html):
-    soup = BeautifulSoup(html, "html.parser")
-    results = []
-
-    tables = soup.find_all("table")
-    for table in tables:
-        for row in table.find_all("tr"):
-            tds = row.find_all("td")
-            if len(tds) < 4:
-                continue
-
-            try:
-                period_td = None
-                date_td = None
-                nums_td = None
-
-                for td in tds:
-                    text = td.get_text(strip=True)
-                    if re.match(r"^\d{5,}$", text):
-                        period_td = text
-                    elif re.search(r"\d{4}[-/年]\d{1,2}[-/月]\d{1,2}", text):
-                        date_td = text
-
-                em_tags = row.find_all("em")
-                if em_tags:
-                    digits = [em.get_text(strip=True) for em in em_tags if em.get_text(strip=True).isdigit()]
-                else:
-                    all_text = row.get_text()
-                    digits = re.findall(r"\d", all_text)
-
-                if not period_td or len(digits) < 3:
-                    continue
-
-                n1, n2, n3 = int(digits[0]), int(digits[1]), int(digits[2])
-                draw_date = normalize_date(date_td) if date_td else ""
-                pattern = determine_pattern(n1, n2, n3)
-                results.append({
-                    "period": period_td,
-                    "num1": n1,
-                    "num2": n2,
-                    "num3": n3,
-                    "pattern": pattern,
-                    "draw_date": draw_date,
-                })
-            except (ValueError, IndexError):
-                continue
-
+    except Exception:
+        pass
     return results
 
 
 def normalize_date(raw):
-    raw = raw.strip()
+    raw = str(raw).strip()
     m = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})", raw)
     if m:
         return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
@@ -299,39 +229,40 @@ def fetch_from_source(source_idx=0, max_pages=50, cutoff=None):
     if cutoff is None:
         cutoff = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
 
-    source = DATA_SOURCES[source_idx]
+    source = API_SOURCES[source_idx]
     session = create_session(source_idx)
     all_records = []
     errors = []
     status_codes = []
 
-    if source_idx == 0:
-        parse_func = parse_zhcw_page
-    elif source_idx == 1:
-        parse_func = parse_sina_page
+    if source["type"] == "cwl":
+        parse_func = parse_cwl_data
+    elif source["type"] == "sporttery":
+        parse_func = parse_sporttery_data
     else:
-        parse_func = parse_163_page
+        return pd.DataFrame(), ["未知数据源类型"], status_codes
 
     for page in range(1, max_pages + 1):
-        url = source["url"].format(page)
-        html, error = fetch_page_with_retry(session, url)
+        params = dict(source["params"])
+        params["pageNo"] = page
+        data, error = fetch_json_with_retry(session, source["url"], params=params)
 
-        if html is None:
+        if data is None:
             errors.append(f"第{page}页: {error}")
-            if error and "HTTP" in str(error):
-                status_codes.append(error)
+            if error:
+                status_codes.append(f"{source['name']}: {error}")
             break
 
-        records = parse_func(html)
+        records = parse_func(data)
         if not records:
             break
 
         for rec in records:
-            if rec["draw_date"] < cutoff:
+            if rec["draw_date"] and rec["draw_date"] < cutoff:
                 return pd.DataFrame(all_records), None, status_codes
             all_records.append(rec)
 
-        time.sleep(0.5)
+        time.sleep(0.3)
 
     if not all_records:
         return pd.DataFrame(), errors if errors else ["无有效数据"], status_codes
@@ -345,7 +276,7 @@ def fetch_from_source(source_idx=0, max_pages=50, cutoff=None):
 def fetch_with_fallback():
     """带备用源的抓取：主站失败自动切备用站"""
     all_status_codes = []
-    for idx, source in enumerate(DATA_SOURCES):
+    for idx, source in enumerate(API_SOURCES):
         print(f"尝试数据源: {source['name']}...")
         df, errors, status_codes = fetch_from_source(source_idx=idx)
         all_status_codes.extend(status_codes)
@@ -354,7 +285,7 @@ def fetch_with_fallback():
             return df, None, all_status_codes
         print(f"  {source['name']} 失败: {errors}")
 
-    return pd.DataFrame(), [f"所有数据源均失败"], all_status_codes
+    return pd.DataFrame(), ["所有数据源均失败"], all_status_codes
 
 
 def incremental_update():
