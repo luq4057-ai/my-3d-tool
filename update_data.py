@@ -43,39 +43,27 @@ API_SOURCES = [
         "type": "cwl",
     },
     {
-        "name": "体彩API",
-        "url": "https://webapi.sporttery.cn/gateway/lottery/getHistoryPageListV1.qry",
+        "name": "中彩网API",
+        "url": "https://www.cwl.gov.cn/cwl_admin/front/cwlkj/search/kjxx/findDrawNotice",
         "params": {
-            "gameNo": "3d",
-            "provinceId": "0",
-            "pageSize": "100",
-            "is498": "true",
+            "name": "3d",
+            "issueCount": "",
+            "issueStart": "",
+            "issueEnd": "",
+            "dayStart": "",
+            "dayEnd": "",
             "pageNo": 1,
+            "pageSize": 100,
+            "systemType": "PC",
         },
         "headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
             "Accept": "application/json, text/javascript, */*; q=0.01",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Referer": "https://www.sporttery.cn/jc/jsq/dlt/",
-            "Connection": "keep-alive",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+            "Referer": "http://kaijiang.zhcw.com/zhcw/html/3d/",
+            "X-Requested-With": "XMLHttpRequest",
         },
-        "type": "sporttery",
-    },
-    {
-        "name": "500彩票API",
-        "url": "https://datachart.500.com/3d/history/newinc/history.php",
-        "params": {
-            "start": "",
-            "end": "",
-        },
-        "headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Referer": "https://datachart.500.com/3d/",
-            "Connection": "keep-alive",
-        },
-        "type": "500",
+        "type": "cwl",
     },
 ]
 
@@ -201,9 +189,11 @@ def parse_cwl_data(data):
             if not re.match(r"^\d{5,}$", code):
                 continue
             red = item.get("red", "")
-            digits = red.split()
+            digits = [d.strip() for d in red.split(",") if d.strip().isdigit()]
             if len(digits) < 3:
-                digits = list(red)
+                digits = [d for d in red.split() if d.isdigit()]
+            if len(digits) < 3:
+                digits = [c for c in red if c.isdigit()]
             if len(digits) < 3:
                 continue
             n1, n2, n3 = int(digits[0]), int(digits[1]), int(digits[2])
@@ -325,39 +315,14 @@ def fetch_from_source(source_idx=0, max_pages=50, cutoff=None):
     errors = []
 
     for page in range(1, max_pages + 1):
-        if source["type"] in ("cwl", "sporttery"):
-            params = dict(source["params"])
-            params["pageNo"] = page
-            data, error = fetch_json_with_retry(session, source["url"], params=params)
-            if data is None:
-                errors.append(f"第{page}页: {error}")
-                break
-            if source["type"] == "cwl":
-                records = parse_cwl_data(data)
-            else:
-                records = parse_sporttery_data(data)
-        elif source["type"] == "500":
-            params = dict(source["params"])
-            start_date = (datetime.now() - timedelta(days=365)).strftime("%Y%m")
-            end_date = datetime.now().strftime("%Y%m")
-            params["start"] = start_date
-            params["end"] = end_date
-            html, error = fetch_html_with_retry(session, source["url"], params=params)
-            if html is None:
-                errors.append(f"HTML抓取失败: {error}")
-                break
-            records = parse_500_data(html)
-            if not records:
-                break
-            for rec in records:
-                if rec["draw_date"] and rec["draw_date"] >= cutoff:
-                    all_records.append(rec)
-                elif not rec["draw_date"]:
-                    all_records.append(rec)
-            break
-        else:
+        params = dict(source["params"])
+        params["pageNo"] = page
+        data, error = fetch_json_with_retry(session, source["url"], params=params)
+        if data is None:
+            errors.append(f"第{page}页: {error}")
             break
 
+        records = parse_cwl_data(data)
         if not records:
             break
 
