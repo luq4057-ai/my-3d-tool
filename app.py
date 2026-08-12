@@ -77,6 +77,139 @@ def extract_features(df):
     return df
 
 
+def pattern_recognition_engine(df, window=20, min_streak=4):
+    df = df.copy()
+    if len(df) < window:
+        window = len(df)
+    recent = df.tail(window).reset_index(drop=True)
+    findings = []
+
+    def _find_streak(series, name, label_fn=None):
+        if len(series) == 0:
+            return
+        val = series.iloc[-1]
+        streak = 0
+        for v in series.iloc[::-1]:
+            if v == val:
+                streak += 1
+            else:
+                break
+        if streak >= min_streak:
+            display_val = label_fn(val) if label_fn else str(val)
+            opposite = None
+            if isinstance(val, str) and val in ("大", "小"):
+                opposite = "小" if val == "大" else "大"
+            elif isinstance(val, str) and val in ("奇", "偶"):
+                opposite = "偶" if val == "奇" else "奇"
+            elif isinstance(val, int) and name.endswith("012路"):
+                opposite = [r for r in [0, 1, 2] if r != val]
+            suggestion = f"建议下期关注：{opposite}" if opposite else ""
+            findings.append(f"规律：{name}连续为【{display_val}】，已连出 {streak} 次。{suggestion}")
+
+    if "sum_tail_size" in recent.columns:
+        _find_streak(recent["sum_tail_size"], "和尾大小")
+
+    if "sum_road" in recent.columns:
+        _find_streak(recent["sum_road"], "和值012路", lambda v: f"{v}路")
+
+    if "road1" in recent.columns:
+        _find_streak(recent["road1"], "百位012路", lambda v: f"{v}路")
+    if "road2" in recent.columns:
+        _find_streak(recent["road2"], "十位012路", lambda v: f"{v}路")
+    if "road3" in recent.columns:
+        _find_streak(recent["road3"], "个位012路", lambda v: f"{v}路")
+
+    if "pattern" in recent.columns:
+        _find_streak(recent["pattern"], "形态")
+
+    recent["sum_parity"] = recent["sum_val"].apply(lambda x: "奇" if x % 2 else "偶")
+    _find_streak(recent["sum_parity"], "和值奇偶")
+
+    recent["span_size"] = recent["span"].apply(lambda x: "大" if x >= 5 else "小")
+    _find_streak(recent["span_size"], "跨度大小")
+
+    recent["sum_range"] = recent["sum_val"].apply(
+        lambda x: "0-9" if x <= 9 else "10-18" if x <= 18 else "19-27"
+    )
+    _find_streak(recent["sum_range"], "和值区间")
+
+    def _find_cross_period_rules(recent, min_hits=3):
+        n = len(recent)
+        if n < 4:
+            return
+
+        rules = [
+            {
+                "name": "上期(十位+个位)和尾 → 本期百位",
+                "calc_prev": lambda r: (r["num2"] + r["num3"]) % 10,
+                "calc_curr": lambda r: r["num1"],
+            },
+            {
+                "name": "上期(百位+个位)和尾 → 本期十位",
+                "calc_prev": lambda r: (r["num1"] + r["num3"]) % 10,
+                "calc_curr": lambda r: r["num2"],
+            },
+            {
+                "name": "上期(百位+十位)和尾 → 本期个位",
+                "calc_prev": lambda r: (r["num1"] + r["num2"]) % 10,
+                "calc_curr": lambda r: r["num3"],
+            },
+            {
+                "name": "上期和尾 → 本期百位",
+                "calc_prev": lambda r: r["sum_tail"],
+                "calc_curr": lambda r: r["num1"],
+            },
+            {
+                "name": "上期个位 → 本期百位",
+                "calc_prev": lambda r: r["num3"],
+                "calc_curr": lambda r: r["num1"],
+            },
+            {
+                "name": "上期跨度 → 本期和尾",
+                "calc_prev": lambda r: r["span"],
+                "calc_curr": lambda r: r["sum_tail"],
+            },
+            {
+                "name": "上期百位012路 → 本期个位012路",
+                "calc_prev": lambda r: r["road1"],
+                "calc_curr": lambda r: r["road3"],
+            },
+            {
+                "name": "上期和值012路 → 本期和值012路",
+                "calc_prev": lambda r: r["sum_road"],
+                "calc_curr": lambda r: r["sum_road"],
+            },
+        ]
+
+        for rule in rules:
+            hits = 0
+            checked = 0
+            for i in range(1, n):
+                try:
+                    prev_val = rule["calc_prev"](recent.iloc[i - 1])
+                    curr_val = rule["calc_curr"](recent.iloc[i])
+                    checked += 1
+                    if prev_val == curr_val:
+                        hits += 1
+                except (KeyError, TypeError):
+                    continue
+
+            if checked >= 3 and hits / checked >= 0.5:
+                pct = hits / checked * 100
+                try:
+                    last_prev = rule["calc_prev"](recent.iloc[-1])
+                    findings.append(
+                        f"关联：{rule['name']}，近{checked}期命中{hits}次({pct:.0f}%)，"
+                        f"上期前置值={last_prev}，建议本期关注：{last_prev}"
+                    )
+                except (KeyError, TypeError):
+                    pass
+
+    _find_cross_period_rules(recent, min_hits=3)
+
+    return findings
+
+
 def calc_missing(df):
     result = {}
     for digit in range(10):
@@ -258,6 +391,34 @@ with tab1:
     col2.metric("组六", f"{zu6_count} 期 ({zu6_count / total:.1%})")
     col3.metric("组三", f"{zu3_count} 期 ({zu3_count / total:.1%})")
     col4.metric("豹子", f"{bao_count} 期 ({bao_count / total:.1%})")
+
+    st.divider()
+    st.subheader("🧠 智能规律扫描")
+    scan_window = st.slider("扫描期数", min_value=10, max_value=50, value=20, step=5, key="scan_window")
+    scan_streak = st.slider("最短连出次数", min_value=2, max_value=6, value=4, step=1, key="scan_streak")
+
+    findings = pattern_recognition_engine(df_feat, window=scan_window, min_streak=scan_streak)
+
+    if findings:
+        for f in findings:
+            if f.startswith("规律："):
+                st.markdown(
+                    f'<div style="background:linear-gradient(135deg,#1a1a2e,#16213e);'
+                    f'border-left:4px solid #ffd93d;padding:12px 16px;border-radius:8px;'
+                    f'margin:6px 0;font-size:15px;color:#e0e0e0">'
+                    f'📊 {f}</div>',
+                    unsafe_allow_html=True,
+                )
+            elif f.startswith("关联："):
+                st.markdown(
+                    f'<div style="background:linear-gradient(135deg,#1a1a2e,#0f3460);'
+                    f'border-left:4px solid #4dabf7;padding:12px 16px;border-radius:8px;'
+                    f'margin:6px 0;font-size:15px;color:#e0e0e0">'
+                    f'🔗 {f}</div>',
+                    unsafe_allow_html=True,
+                )
+    else:
+        st.info(f"近 {scan_window} 期未检测到连续 {scan_streak} 次以上的规律，数据较为随机。")
 
 with tab2:
     freq_col1, freq_col2 = st.columns(2)
