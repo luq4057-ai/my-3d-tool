@@ -14,6 +14,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -24,21 +26,32 @@ jobs:
         run: |
           pip install requests beautifulsoup4 urllib3
 
+      - name: Check existing database
+        run: |
+          if [ -f lottery_data.db ]; then
+            echo "Database exists, size: $(stat -c%s lottery_data.db) bytes"
+            sqlite3 lottery_data.db "SELECT COUNT(*) as total, MAX(period) as latest FROM history3d;"
+          else
+            echo "No database file found, will create new one"
+          fi
+
       - name: Run data update
         run: python update_data.py
 
-      - name: Check for changes
-        id: check_changes
+      - name: Verify update result
         run: |
-          if git diff --quiet lottery_data.db; then
-            echo "has_changes=false" >> $GITHUB_OUTPUT
+          if [ -f lottery_data.db ]; then
+            echo "Database after update, size: $(stat -c%s lottery_data.db) bytes"
+            sqlite3 lottery_data.db "SELECT COUNT(*) as total, MAX(period) as latest FROM history3d;"
           else
-            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "ERROR: Database file not found after update!"
+            exit 1
           fi
 
       - name: Commit and push if changed
-        if: steps.check_changes.outputs.has_changes == 'true'
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "chore: auto-update 3D lottery data [skip ci]"
           file_pattern: lottery_data.db
+          commit_user_name: "github-actions[bot]"
+          commit_user_email: "github-actions[bot]@users.noreply.github.com"
