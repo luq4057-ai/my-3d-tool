@@ -839,6 +839,8 @@ if df.empty:
     """)
     st.stop()
 
+df_feat = extract_features(df)
+
 latest_date = df["draw_date"].max()
 st.caption(f"📅 数据更新至: {latest_date}  |  共 {len(df)} 期  |  由 GitHub Actions 自动更新")
 
@@ -991,8 +993,6 @@ with st.sidebar:
     st.caption("⚠️ 仅供参考，不构成投注建议")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📊 数据总览", "📈 走势统计", "🎯 策略回测", "🧭 专家决策看板"])
-
-df_feat = extract_features(df)
 
 with tab1:
     st.subheader("最近 10 期开奖数据")
