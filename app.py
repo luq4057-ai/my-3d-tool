@@ -6,6 +6,7 @@ from datetime import datetime
 import re
 import sqlite3
 import itertools
+import os
 
 MULTIPLIERS = {5: 15.0, 6: 7.5, 7: 4.3}
 
@@ -151,18 +152,22 @@ def determine_pattern(n1, n2, n3):
 
 @st.cache_resource(ttl=1800)
 def load_records():
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        df = pd.read_sql_query(
-            f"SELECT period, num1, num2, num3, pattern, draw_date "
-            f"FROM {TABLE_NAME} ORDER BY period ASC",
-            conn,
-        )
-        conn.close()
-        if not df.empty:
-            return df
-    except Exception:
-        pass
+    # 检测是否在云端环境
+    is_cloud = os.environ.get("STREAMLIT_CLOUD_APP_ID") is not None
+    
+    if not is_cloud:
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            df = pd.read_sql_query(
+                f"SELECT period, num1, num2, num3, pattern, draw_date "
+                f"FROM {TABLE_NAME} ORDER BY period ASC",
+                conn,
+            )
+            conn.close()
+            if not df.empty:
+                return df
+        except Exception:
+            pass
     
     try:
         import requests
