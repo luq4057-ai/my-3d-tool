@@ -3,6 +3,8 @@ name: Daily 3D Lottery Data Update
 on:
   schedule:
     - cron: '0 14 * * *'
+    - cron: '0 18 * * *'
+    - cron: '0 22 * * *'
   workflow_dispatch:
 
 jobs:
@@ -10,6 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      issues: write
 
     steps:
       - name: Checkout repository
@@ -30,19 +33,28 @@ jobs:
         run: |
           if [ -f lottery_data.db ]; then
             echo "Database exists, size: $(stat -c%s lottery_data.db) bytes"
-            sqlite3 lottery_data.db "SELECT COUNT(*) as total, MAX(period) as latest FROM history3d;"
+            sqlite3 lottery_data.db "SELECT COUNT(*) as total, MAX(period) as latest, MAX(draw_date) as latest_date FROM history3d;"
           else
             echo "No database file found, will create new one"
           fi
 
       - name: Run data update
-        run: python update_data.py
+        id: update
+        run: |
+          python update_data.py 2>&1 | tee update_log.txt
+          if grep -q "成功更新" update_log.txt; then
+            echo "result=success" >> $GITHUB_OUTPUT
+          elif grep -q "无新数据需要更新" update_log.txt; then
+            echo "result=uptodate" >> $GITHUB_OUTPUT
+          else
+            echo "result=failed" >> $GITHUB_OUTPUT
+          fi
 
       - name: Verify update result
         run: |
           if [ -f lottery_data.db ]; then
             echo "Database after update, size: $(stat -c%s lottery_data.db) bytes"
-            sqlite3 lottery_data.db "SELECT COUNT(*) as total, MAX(period) as latest FROM history3d;"
+            sqlite3 lottery_data.db "SELECT COUNT(*) as total, MAX(period) as latest, MAX(draw_date) as latest_date FROM history3d;"
           else
             echo "ERROR: Database file not found after update!"
             exit 1
@@ -55,3 +67,17 @@ jobs:
           file_pattern: lottery_data.db
           commit_user_name: "github-actions[bot]"
           commit_user_email: "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create issue on failure
+        if: steps.update.outputs.result == 'failed'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const date = new Date().toISOString().split('T')[0];
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `⚠️ 数据更新失败 ${date}`,
+              body: `福彩3D数据自动更新在 ${date} 失败。\n\n请检查：\n1. 数据源是否可用\n2. 网络连接是否正常\n3. 手动运行 workflow_dispatch 重试\n\n[查看运行日志](https://github.com/${context.repo.owner}/${context.repo.repo}/actions)`,
+              labels: ['bug', 'auto-update']
+            });

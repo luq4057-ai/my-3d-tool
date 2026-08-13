@@ -30,7 +30,7 @@ API_SOURCES = [
             "systemType": "PC",
         },
         "headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "application/json, text/javascript, */*; q=0.01",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "Accept-Encoding": "gzip, deflate, br",
@@ -44,11 +44,32 @@ API_SOURCES = [
         "type": "cwl",
     },
     {
+        "name": "福彩官方API-精简请求(cwl.gov.cn)",
+        "url": "https://www.cwl.gov.cn/cwl_admin/front/cwlkj/search/kjxx/findDrawNotice",
+        "params": {
+            "name": "3d",
+            "issueCount": "",
+            "issueStart": "",
+            "issueEnd": "",
+            "dayStart": "",
+            "dayEnd": "",
+            "pageNo": 1,
+            "pageSize": 100,
+            "systemType": "PC",
+        },
+        "headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Referer": "https://www.cwl.gov.cn/ygkj/wqkj/sd/",
+        },
+        "type": "cwl",
+    },
+    {
         "name": "中彩网页面(zhcw.com)",
         "url": "http://kaijiang.zhcw.com/zhcw/inc/3d/3d_wqhg.jsp",
         "params": {},
         "headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "Referer": "http://kaijiang.zhcw.com/zhcw/html/3d/",
