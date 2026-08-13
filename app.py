@@ -171,30 +171,38 @@ def load_records():
     
     try:
         import requests
-        url = "https://www.mxnzp.com/api/lottery/common/history"
+        url = "https://www.cwl.gov.cn/cwl_admin/front/cwlkj/search/kjxx/findDrawNotice"
         params = {
-            "code": "fc3d",
-            "pageSize": 500,
-            "appKey": "48354e7accb4499d4555be79f1ea38c1",
+            "name": "3d",
+            "issueCount": 500,
         }
-        resp = requests.get(url, params=params, timeout=10)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://www.cwl.gov.cn/ygkj/wqkjgg/fc3d/",
+        }
+        resp = requests.get(url, params=params, headers=headers, timeout=15)
         data = resp.json()
-        if data.get("code") == 1 and data.get("data"):
+        if data.get("state") == 0 and data.get("result"):
             records = []
-            for item in data["data"]:
-                n1, n2, n3 = int(item["openCode"][0]), int(item["openCode"][2]), int(item["openCode"][4])
-                pattern = "豹子" if n1 == n2 == n3 else ("组三" if (n1 == n2 or n2 == n3 or n1 == n3) else "组六")
-                records.append({
-                    "period": int(item["expect"]),
-                    "num1": n1,
-                    "num2": n2,
-                    "num3": n3,
-                    "pattern": pattern,
-                    "draw_date": item["openTime"],
-                })
-            return pd.DataFrame(records).sort_values("period").reset_index(drop=True)
-    except Exception:
-        pass
+            for item in data["result"]:
+                red = item.get("red", "")
+                if red:
+                    nums = [int(x) for x in red.split(",")]
+                    if len(nums) >= 3:
+                        n1, n2, n3 = nums[0], nums[1], nums[2]
+                        pattern = "豹子" if n1 == n2 == n3 else ("组三" if (n1 == n2 or n2 == n3 or n1 == n3) else "组六")
+                        records.append({
+                            "period": int(item["code"]),
+                            "num1": n1,
+                            "num2": n2,
+                            "num3": n3,
+                            "pattern": pattern,
+                            "draw_date": item.get("date", ""),
+                        })
+            if records:
+                return pd.DataFrame(records).sort_values("period").reset_index(drop=True)
+    except Exception as e:
+        st.warning(f"数据获取失败: {str(e)}")
     
     return pd.DataFrame()
 
