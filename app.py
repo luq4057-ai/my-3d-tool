@@ -7,6 +7,7 @@ import re
 import sqlite3
 import itertools
 import os
+import numpy as np
 
 MULTIPLIERS = {5: 15.0, 6: 7.5, 7: 4.3}
 
@@ -499,6 +500,96 @@ def build_pattern_chain_chart(df_feat, n_periods=5):
     return fig
 
 
+def calc_kill_numbers(df_feat, n_kills=2):
+    hotness = calc_hotness(df_feat, 30)
+    missing = calc_missing(df_feat)
+    total = len(df_feat)
+    avg_miss = total / 10.0
+
+    engine = LotteryPatternEngine(df_feat)
+    streaks = engine.streak_scan(min_len=3)
+
+    digit_kill_score = {}
+    for d in range(10):
+        ks = 0.0
+        freq = hotness.get(d, 0)
+        if freq <= 4:
+            ks += 4.0
+        elif freq <= 6:
+            ks += 2.0
+        miss = missing.get(d, 0)
+        if miss == 0:
+            ks += 2.0
+        elif miss <= 2:
+            ks += 1.0
+        if miss < avg_miss * 0.3:
+            ks += 2.0
+        for s in streaks:
+            if s["feature"] == "和尾大小" and s["opposite"]:
+                if s["opposite"] == "小" and d >= 5:
+                    ks += 2.5
+                elif s["opposite"] == "大" and d < 5:
+                    ks += 2.5
+            if s["feature"] == "和值奇偶" and s["opposite"]:
+                if s["opposite"] == "偶" and d % 2 == 1:
+                    ks += 2.0
+                elif s["opposite"] == "奇" and d % 2 == 0:
+                    ks += 2.0
+        digit_kill_score[d] = ks
+
+    kill = sorted(range(10), key=lambda d: -digit_kill_score[d])[:n_kills]
+    return kill, digit_kill_score
+
+
+def markov_predict(df_feat, order=2, top_n=3):
+    recent = df_feat.tail(60)
+    transitions = {}
+    for i in range(order, len(recent)):
+        key = tuple(recent.iloc[i - order:i][["num1", "num2", "num3"]].values.flatten())
+        next_row = recent.iloc[i]
+        for pos, col in enumerate(["num1", "num2", "num3"]):
+            pos_key = key + (pos,)
+            if pos_key not in transitions:
+                transitions[pos_key] = {}
+            val = next_row[col]
+            transitions[pos_key][val] = transitions[pos_key].get(val, 0) + 1
+
+    last_row = df_feat.iloc[-1]
+    last_key = tuple(last_row[["num1", "num2", "num3"]].values.flatten())
+
+    predictions = {}
+    for pos in range(3):
+        pos_key = last_key + (pos,)
+        if pos_key in transitions:
+            probs = transitions[pos_key]
+            total = sum(probs.values())
+            sorted_probs = sorted(probs.items(), key=lambda x: -x[1])
+            predictions[pos] = [(d, c / total) for d, c in sorted_probs[:top_n]]
+        else:
+            predictions[pos] = []
+
+    return predictions
+
+
+def bayesian_score(df_feat, digit):
+    recent = df_feat.tail(50)
+    total = len(recent)
+    hotness = calc_hotness(df_feat, 30)
+    missing = calc_missing(df_feat)
+    avg_miss = total / 10.0
+
+    prior = 0.3
+
+    freq = hotness.get(digit, 0)
+    likelihood = min(freq / 9.0, 1.0)
+
+    miss = missing.get(digit, 0)
+    recovery_prior = min(miss / (avg_miss * 3), 1.0) if avg_miss > 0 else 0
+
+    posterior = (likelihood * prior + recovery_prior * (1 - prior)) / 2.0
+    return posterior
+
+
 class LotteryPatternEngine:
     def __init__(self, df):
         self.df = extract_features(df) if "sum_val" not in df.columns else df.copy()
@@ -507,26 +598,41 @@ class LotteryPatternEngine:
     @staticmethod
     def get_hot_scheme(df_feat, n_codes=7):
         hotness = calc_hotness(df_feat, 30)
+        kill_nums, _ = calc_kill_numbers(df_feat, n_kills=2)
+
         ranked = sorted(range(10), key=lambda d: (-hotness[d], d))
-        selected = ranked[:n_codes]
-        top_hot = ranked[:3]
+        selected = [d for d in ranked if d not in kill_nums][:n_codes]
+        for d in ranked:
+            if d not in selected and len(selected) < n_codes:
+                selected.append(d)
+
+        top_hot = [d for d in ranked if d not in kill_nums][:3]
+        kill_str = "、".join(map(str, kill_nums))
         return {
             "digits": sorted(selected),
             "strategy_name": "热号追踪",
-            "core_logic": f"依据近30期出现频次，选取热号{top_hot[0]}、{top_hot[1]}、{top_hot[2]}为核心，追踪惯性出号趋势",
+            "core_logic": f"追踪近30期高频号码，已排除杀号({kill_str})，核心热号{top_hot[0]}、{top_hot[1]}、{top_hot[2]}",
             "detail": {d: f"近30期出现{hotness[d]}次" for d in selected},
         }
 
     @staticmethod
     def get_cold_scheme(df_feat, n_codes=7):
         missing = calc_missing(df_feat)
+        kill_nums, _ = calc_kill_numbers(df_feat, n_kills=2)
+
         ranked = sorted(range(10), key=lambda d: (-missing[d], d))
-        selected = ranked[:n_codes]
-        top_miss = ranked[:3]
+        selected = [d for d in ranked if d not in kill_nums][:n_codes]
+        for d in ranked:
+            if d not in selected and len(selected) < n_codes:
+                selected.append(d)
+
+        top_miss = [d for d in ranked if d not in kill_nums][:3]
+        kill_str = "、".join(map(str, kill_nums))
+        miss_str = "、".join([f"{d}({missing[d]}期)" for d in top_miss])
         return {
             "digits": sorted(selected),
             "strategy_name": "深度遗漏",
-            "core_logic": f"依据遗漏期数偏态，锁定遗漏{top_miss[0]}({missing[top_miss[0]]}期)、{top_miss[1]}({missing[top_miss[1]]}期)、{top_miss[2]}({missing[top_miss[2]]}期)等高遗漏号码，博取回补机会",
+            "core_logic": f"锁定高遗漏号码博取回补，已排除杀号({kill_str})，核心遗漏号{miss_str}",
             "detail": {d: f"已遗漏{missing[d]}期" for d in selected},
         }
 
@@ -536,20 +642,28 @@ class LotteryPatternEngine:
         missing = calc_missing(df_feat)
         total = len(df_feat)
         avg_miss = total / 10.0
+        kill_nums, _ = calc_kill_numbers(df_feat, n_kills=2)
 
         digit_scores = {}
         for d in range(10):
             h_score = hotness[d] / 30.0
             m_score = min(missing[d] / avg_miss, 2.0) / 2.0
             balance = 1.0 - abs(h_score - m_score)
+            if d in kill_nums:
+                balance -= 1.0
             digit_scores[d] = balance
 
         ranked = sorted(range(10), key=lambda d: (-digit_scores[d], d))
-        selected = ranked[:n_codes]
+        selected = [d for d in ranked if d not in kill_nums][:n_codes]
+        for d in ranked:
+            if d not in selected and len(selected) < n_codes:
+                selected.append(d)
+
+        kill_str = "、".join(map(str, kill_nums))
         return {
             "digits": sorted(selected),
             "strategy_name": "形态平衡",
-            "core_logic": f"依据近20期热度与遗漏的均衡度，选取冷热适中的号码，避免极端偏态，追求稳定收益",
+            "core_logic": f"均衡热度与遗漏避免偏态，已排除杀号({kill_str})，追求稳定收益",
             "detail": {d: f"热度{hotness[d]}次/遗漏{missing[d]}期，均衡度{digit_scores[d]:.2f}" for d in selected},
         }
 
@@ -561,10 +675,21 @@ class LotteryPatternEngine:
         streaks = engine.streak_scan(min_len=3)
         recoveries = [r for r in engine.missing_recovery() if r["is_high_recovery"]]
 
+        kill_nums, _ = calc_kill_numbers(df_feat, n_kills=2)
+
+        try:
+            markov_preds = markov_predict(df_feat, order=2, top_n=3)
+        except Exception:
+            markov_preds = {}
+
         digit_scores = {}
         for d in range(10):
             score = 0.0
             reasons = []
+
+            if d in kill_nums:
+                score -= 10.0
+                reasons.append("被标记为杀号，降权")
 
             miss_val = missing.get(d, 0)
             total = len(df_feat)
@@ -606,19 +731,33 @@ class LotteryPatternEngine:
                         elif opp == "奇" and d % 2 == 1:
                             score += 1.5
 
+            b_score = bayesian_score(df_feat, d)
+            score += b_score * 3.0
+
+            for pos in range(3):
+                for pred_d, pred_p in markov_preds.get(pos, []):
+                    if d == pred_d:
+                        score += pred_p * 2.0
+                        if not any("马尔可夫" in r for r in reasons):
+                            reasons.append(f"马尔可夫预测{pos+1}位概率{pred_p:.0%}")
+
             digit_scores[d] = {"score": score, "reasons": reasons}
 
         ranked = sorted(digit_scores.items(), key=lambda x: -x[1]["score"])
-        selected = [d for d, _ in ranked[:n_codes]]
+        selected = [d for d, _ in ranked[:n_codes] if d not in kill_nums]
+        for d, _ in ranked:
+            if d not in selected and len(selected) < n_codes:
+                selected.append(d)
 
         key_reasons = []
         for d, info in ranked[:3]:
             key_reasons.extend(info["reasons"][:1])
 
+        kill_str = "、".join(map(str, kill_nums))
         return {
             "digits": sorted(selected),
             "strategy_name": "综合智能",
-            "core_logic": f"依据近20期多维特征融合（热度+遗漏+连出+回补），综合评分选取最优号码组合",
+            "core_logic": f"融合马尔可夫链+贝叶斯后验+热度遗漏+连出回补，已排除杀号({kill_str})",
             "detail": {d: f"综合分{digit_scores[d]['score']:.1f}" + (f"，{digit_scores[d]['reasons'][0]}" if digit_scores[d]['reasons'] else "") for d in selected},
         }
 
@@ -918,34 +1057,8 @@ def evaluate_user_numbers(input_nums, df_feat):
         details.append(f"邻孤传{c}传{l}邻{g}孤")
 
     # kill numbers & core numbers
-    engine = LotteryPatternEngine(df_feat)
-    streaks = engine.streak_scan(min_len=3)
-    recoveries = engine.missing_recovery()
-
-    digit_kill_score = {}
-    for d in range(10):
-        ks = 0.0
-        freq = hotness.get(d, 0)
-        if freq <= 5:
-            ks += 3.0
-        miss = missing.get(d, 0)
-        if miss == 0:
-            ks += 1.0
-        for s in streaks:
-            if s["feature"] == "和尾大小" and s["opposite"]:
-                if s["opposite"] == "小" and d >= 5:
-                    ks += 2.0
-                elif s["opposite"] == "大" and d < 5:
-                    ks += 2.0
-            if s["feature"] == "和值奇偶" and s["opposite"]:
-                if s["opposite"] == "偶" and d % 2 == 1:
-                    ks += 1.5
-                elif s["opposite"] == "奇" and d % 2 == 0:
-                    ks += 1.5
-        digit_kill_score[d] = ks
-
-    kill_numbers = sorted(range(10), key=lambda d: -digit_kill_score[d])[:2]
-    core_numbers = sorted(range(10), key=lambda d: digit_kill_score[d])[:2]
+    kill_numbers, kill_score_map = calc_kill_numbers(df_feat, n_kills=2)
+    core_numbers = sorted(range(10), key=lambda d: kill_score_map[d])[:2]
 
     # generate explanation
     if score >= 80:
@@ -1128,34 +1241,9 @@ with st.sidebar:
     st.header("🤖 我的决策助手")
 
     engine_sb = LotteryPatternEngine(df)
-    hotness_sb = engine_sb.digit_hotness()
-    missing_sb = calc_missing(df)
-    streaks_sb = engine_sb.streak_scan(min_len=3)
 
-    digit_kill_score_sb = {}
-    for d in range(10):
-        ks = 0.0
-        freq = hotness_sb[30].get(d, 0)
-        if freq <= 5:
-            ks += 3.0
-        miss = missing_sb.get(d, 0)
-        if miss == 0:
-            ks += 1.0
-        for s in streaks_sb:
-            if s["feature"] == "和尾大小" and s["opposite"]:
-                if s["opposite"] == "小" and d >= 5:
-                    ks += 2.0
-                elif s["opposite"] == "大" and d < 5:
-                    ks += 2.0
-            if s["feature"] == "和值奇偶" and s["opposite"]:
-                if s["opposite"] == "偶" and d % 2 == 1:
-                    ks += 1.5
-                elif s["opposite"] == "奇" and d % 2 == 0:
-                    ks += 1.5
-        digit_kill_score_sb[d] = ks
-
-    kill_sb = sorted(range(10), key=lambda d: -digit_kill_score_sb[d])[:2]
-    core_sb = sorted(range(10), key=lambda d: digit_kill_score_sb[d])[:2]
+    kill_sb, kill_scores_sb = calc_kill_numbers(df, n_kills=2)
+    core_sb = sorted(range(10), key=lambda d: kill_scores_sb[d])[:2]
 
     st.subheader("🎯 今日推荐胆码")
     core_c1, core_c2 = st.columns(2)
@@ -1666,6 +1754,70 @@ with tab3:
                 f"中奖率 {best['win_rate']:.2%}  |  "
                 f"回报率 {best['roi']:+.2f}%  |  "
                 f"净盈亏 {best['net_profit']:+,.1f}元"
+            )
+
+            st.subheader("🎯 智能推荐结论")
+
+            kill_nums_now, _ = calc_kill_numbers(df_feat, n_kills=2)
+
+            try:
+                markov_preds = markov_predict(df_feat, order=2, top_n=3)
+                markov_digits = set()
+                for pos in range(3):
+                    for d, p in markov_preds.get(pos, []):
+                        markov_digits.add(d)
+                markov_str = "、".join(map(str, sorted(markov_digits - set(kill_nums_now))))
+            except Exception:
+                markov_str = "数据不足"
+
+            hotness_now = calc_hotness(df_feat, 30)
+            missing_now = calc_missing(df_feat)
+            top_hot = sorted(range(10), key=lambda d: -hotness_now[d])[:3]
+            top_miss = sorted(range(10), key=lambda d: -missing_now[d])[:3]
+
+            c_rec1, c_rec2, c_rec3 = st.columns(3)
+            with c_rec1:
+                st.markdown(
+                    f'<div style="text-align:center;padding:16px;background:linear-gradient(135deg,#1a2e1a,#0f4f0f);'
+                    f'border-radius:12px;border:2px solid #6bcb77">'
+                    f'<div style="color:#6bcb77;font-size:12px;margin-bottom:8px">🏆 最优5码</div>'
+                    f'<div style="font-size:32px;font-weight:bold;color:#6bcb77;letter-spacing:6px">'
+                    f'{"".join(map(str, best["digits"][:5]))}</div>'
+                    f'<div style="color:#aaa;font-size:11px;margin-top:6px">中奖率{best["win_rate"]:.1%} · 回报率{best["roi"]:+.1f}%</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            with c_rec2:
+                st.markdown(
+                    f'<div style="text-align:center;padding:16px;background:linear-gradient(135deg,#1a1a2e,#0f3460);'
+                    f'border-radius:12px;border:2px solid #4dabf7">'
+                    f'<div style="color:#4dabf7;font-size:12px;margin-bottom:8px">🔥 热号TOP3</div>'
+                    f'<div style="font-size:32px;font-weight:bold;color:#4dabf7;letter-spacing:6px">'
+                    f'{" ".join(map(str, top_hot))}</div>'
+                    f'<div style="color:#aaa;font-size:11px;margin-top:6px">近30期最高频</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            with c_rec3:
+                st.markdown(
+                    f'<div style="text-align:center;padding:16px;background:linear-gradient(135deg,#2e1a1a,#4f0f0f);'
+                    f'border-radius:12px;border:2px solid #ff6b6b">'
+                    f'<div style="color:#ff6b6b;font-size:12px;margin-bottom:8px">🚫 杀号(排除)</div>'
+                    f'<div style="font-size:32px;font-weight:bold;color:#ff6b6b;letter-spacing:6px">'
+                    f'{" ".join(map(str, kill_nums_now))}</div>'
+                    f'<div style="color:#aaa;font-size:11px;margin-top:6px">下期大概率不出</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown(
+                f'<div style="padding:14px;background:linear-gradient(135deg,#1a1a2e,#0f3460);'
+                f'border-radius:10px;border:1px solid #ffd93d;margin-top:12px">'
+                f'<div style="color:#ffd93d;font-size:13px;margin-bottom:6px">🧠 马尔可夫链预测</div>'
+                f'<div style="color:#e0e0e0;font-size:14px">基于近60期转移概率，下期各位置高概率数字：{markov_str}</div>'
+                f'<div style="color:#aaa;font-size:12px;margin-top:4px">注：马尔可夫预测仅反映短期转移概率，不构成投注建议</div>'
+                f'</div>',
+                unsafe_allow_html=True,
             )
 
 with tab4:
