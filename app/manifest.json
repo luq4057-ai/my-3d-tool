@@ -1,0 +1,26 @@
+{
+  "name": "3D智能决策",
+  "short_name": "3D决策",
+  "description": "福彩3D智能分析平台 - 基于历史数据的智能预测与决策辅助工具",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f0f23",
+  "theme_color": "#1a1a2e",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/static/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/static/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["utilities", "finance"],
+  "lang": "zh-CN"
+}

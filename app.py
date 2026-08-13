@@ -14,6 +14,132 @@ TABLE_NAME = "history3d"
 
 st.set_page_config(page_title="福彩3D 智能分析", layout="wide")
 
+st.markdown("""
+<link rel="manifest" href="app/manifest.json">
+<meta name="theme-color" content="#1a1a2e">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="3D智能决策">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="apple-touch-icon" href="app/icons/icon-192.png">
+<link rel="apple-touch-icon-precomposed" href="app/icons/icon-192.png">
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', function() {
+    navigator.serviceWorker.register('app/service-worker.js', { scope: '/' })
+      .then(reg => console.log('Service Worker registered'))
+      .catch(err => console.log('Service Worker failed:', err));
+  });
+}
+</script>
+<style>
+#MainMenu, header, footer, .stDeployButton,
+[data-testid="stToolbar"], [data-testid="stDecoration"],
+[data-testid="stStatusWidget"], [data-testid="stAlertDismiss"],
+.stApp > header, .viewerToolbar, .st-emotion-cache-1dpwcvir,
+.st-emotion-cache-1y4p8pa, .st-emotion-cache-nt8o1q {
+  visibility: hidden !important;
+  display: none !important;
+}
+footer::after {
+  content: "" !important;
+  display: none !important;
+}
+[data-testid="stDecoration"] {
+  display: none !important;
+  height: 0 !important;
+}
+[data-testid="stToolbar"] {
+  display: none !important;
+}
+@media (max-width: 768px) {
+  button[kind="primary"], button[kind="secondary"], button[kind="tertiary"] {
+    min-height: 48px !important;
+    padding: 12px 20px !important;
+    font-size: 16px !important;
+    margin: 8px 0 !important;
+  }
+  input, textarea, select {
+    font-size: 16px !important;
+    min-height: 44px !important;
+    padding: 12px !important;
+  }
+  [data-baseweb="tab"] {
+    min-height: 48px !important;
+    padding: 12px 16px !important;
+  }
+  input[type="range"] {
+    height: 32px !important;
+  }
+  .stMarkdown, .stText, p, span, div {
+    font-size: 15px !important;
+    line-height: 1.6 !important;
+  }
+  .stDataFrame, .stTable {
+    overflow-x: auto !important;
+    font-size: 13px !important;
+  }
+  .stContainer, .stExpander {
+    margin: 12px 0 !important;
+    padding: 12px !important;
+  }
+  .stColumn > div {
+    padding: 8px !important;
+  }
+}
+.loading-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(15, 15, 35, 0.95);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 9999;
+  transition: opacity 0.3s;
+}
+.loading-overlay.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+.loading-spinner {
+  width: 60px;
+  height: 60px;
+  border: 4px solid rgba(77, 171, 247, 0.3);
+  border-top: 4px solid #4dabf7;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+.stApp {
+  background: linear-gradient(135deg, #0f0f23 0%, #1a1a2e 100%) !important;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.stApp {
+  overscroll-behavior: none;
+  -webkit-overflow-scrolling: touch;
+}
+@media (max-width: 768px) {
+  ::-webkit-scrollbar {
+    display: none;
+  }
+  body {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
+</style>
+""", unsafe_allow_html=True)
+
 
 def determine_pattern(n1, n2, n3):
     if n1 == n2 == n3:
@@ -37,6 +163,34 @@ def load_records():
             return df
     except Exception:
         pass
+    
+    try:
+        import requests
+        url = "https://www.mxnzp.com/api/lottery/common/history"
+        params = {
+            "code": "fc3d",
+            "pageSize": 500,
+            "appKey": "48354e7accb4499d4555be79f1ea38c1",
+        }
+        resp = requests.get(url, params=params, timeout=10)
+        data = resp.json()
+        if data.get("code") == 1 and data.get("data"):
+            records = []
+            for item in data["data"]:
+                n1, n2, n3 = int(item["openCode"][0]), int(item["openCode"][2]), int(item["openCode"][4])
+                pattern = "豹子" if n1 == n2 == n3 else ("组三" if (n1 == n2 or n2 == n3 or n1 == n3) else "组六")
+                records.append({
+                    "period": int(item["expect"]),
+                    "num1": n1,
+                    "num2": n2,
+                    "num3": n3,
+                    "pattern": pattern,
+                    "draw_date": item["openTime"],
+                })
+            return pd.DataFrame(records).sort_values("period").reset_index(drop=True)
+    except Exception:
+        pass
+    
     return pd.DataFrame()
 
 
@@ -337,6 +491,124 @@ class LotteryPatternEngine:
         self.df = extract_features(df) if "sum_val" not in df.columns else df.copy()
         self.total = len(self.df)
 
+    @staticmethod
+    def get_hot_scheme(df_feat, n_codes=7):
+        hotness = calc_hotness(df_feat, 30)
+        ranked = sorted(range(10), key=lambda d: (-hotness[d], d))
+        selected = ranked[:n_codes]
+        top_hot = ranked[:3]
+        return {
+            "digits": sorted(selected),
+            "strategy_name": "热号追踪",
+            "core_logic": f"依据近30期出现频次，选取热号{top_hot[0]}、{top_hot[1]}、{top_hot[2]}为核心，追踪惯性出号趋势",
+            "detail": {d: f"近30期出现{hotness[d]}次" for d in selected},
+        }
+
+    @staticmethod
+    def get_cold_scheme(df_feat, n_codes=7):
+        missing = calc_missing(df_feat)
+        ranked = sorted(range(10), key=lambda d: (-missing[d], d))
+        selected = ranked[:n_codes]
+        top_miss = ranked[:3]
+        return {
+            "digits": sorted(selected),
+            "strategy_name": "深度遗漏",
+            "core_logic": f"依据遗漏期数偏态，锁定遗漏{top_miss[0]}({missing[top_miss[0]]}期)、{top_miss[1]}({missing[top_miss[1]]}期)、{top_miss[2]}({missing[top_miss[2]]}期)等高遗漏号码，博取回补机会",
+            "detail": {d: f"已遗漏{missing[d]}期" for d in selected},
+        }
+
+    @staticmethod
+    def get_balance_scheme(df_feat, n_codes=7):
+        hotness = calc_hotness(df_feat, 30)
+        missing = calc_missing(df_feat)
+        total = len(df_feat)
+        avg_miss = total / 10.0
+
+        digit_scores = {}
+        for d in range(10):
+            h_score = hotness[d] / 30.0
+            m_score = min(missing[d] / avg_miss, 2.0) / 2.0
+            balance = 1.0 - abs(h_score - m_score)
+            digit_scores[d] = balance
+
+        ranked = sorted(range(10), key=lambda d: (-digit_scores[d], d))
+        selected = ranked[:n_codes]
+        return {
+            "digits": sorted(selected),
+            "strategy_name": "形态平衡",
+            "core_logic": f"依据近20期热度与遗漏的均衡度，选取冷热适中的号码，避免极端偏态，追求稳定收益",
+            "detail": {d: f"热度{hotness[d]}次/遗漏{missing[d]}期，均衡度{digit_scores[d]:.2f}" for d in selected},
+        }
+
+    @staticmethod
+    def get_smart_scheme(df_feat, n_codes=7):
+        engine = LotteryPatternEngine(df_feat)
+        hotness = calc_hotness(df_feat, 30)
+        missing = calc_missing(df_feat)
+        streaks = engine.streak_scan(min_len=3)
+        recoveries = [r for r in engine.missing_recovery() if r["is_high_recovery"]]
+
+        digit_scores = {}
+        for d in range(10):
+            score = 0.0
+            reasons = []
+
+            miss_val = missing.get(d, 0)
+            total = len(df_feat)
+            avg_miss = total / 10.0
+            if miss_val > avg_miss * 2:
+                score += 3.0
+                reasons.append(f"遗漏{miss_val}期超2倍均值")
+            elif miss_val > avg_miss:
+                score += 1.5
+
+            freq = hotness.get(d, 0)
+            if freq >= 12:
+                score += 2.0
+            elif freq >= 8:
+                score += 1.0
+
+            for rec in recoveries:
+                pname = rec["pattern"]
+                if "全大" in pname and d >= 5:
+                    score += 2.0
+                elif "全小" in pname and d < 5:
+                    score += 2.0
+                elif "全偶" in pname and d % 2 == 0:
+                    score += 2.0
+                elif "全奇" in pname and d % 2 == 1:
+                    score += 2.0
+
+            for s in streaks:
+                opp = s["opposite"]
+                if opp:
+                    if s["feature"] == "和尾大小":
+                        if opp == "小" and d < 5:
+                            score += 2.0
+                        elif opp == "大" and d >= 5:
+                            score += 2.0
+                    elif s["feature"] == "和值奇偶":
+                        if opp == "偶" and d % 2 == 0:
+                            score += 1.5
+                        elif opp == "奇" and d % 2 == 1:
+                            score += 1.5
+
+            digit_scores[d] = {"score": score, "reasons": reasons}
+
+        ranked = sorted(digit_scores.items(), key=lambda x: -x[1]["score"])
+        selected = [d for d, _ in ranked[:n_codes]]
+
+        key_reasons = []
+        for d, info in ranked[:3]:
+            key_reasons.extend(info["reasons"][:1])
+
+        return {
+            "digits": sorted(selected),
+            "strategy_name": "综合智能",
+            "core_logic": f"依据近20期多维特征融合（热度+遗漏+连出+回补），综合评分选取最优号码组合",
+            "detail": {d: f"综合分{digit_scores[d]['score']:.1f}" + (f"，{digit_scores[d]['reasons'][0]}" if digit_scores[d]['reasons'] else "") for d in selected},
+        }
+
     def digit_hotness(self):
         result = {}
         for window in [10, 30, 50]:
@@ -446,125 +718,81 @@ class LotteryPatternEngine:
 
         return result
 
-    def generate_schemes(self, n_schemes=3):
-        streaks = self.streak_scan(min_len=3)
-        recoveries = [r for r in self.missing_recovery() if r["is_high_recovery"]]
-        hotness = self.digit_hotness()
-        missing = calc_missing(self.df)
+    def generate_schemes(self, n_schemes=3, strategy="综合智能"):
+        strategy_map = {
+            "热号追踪": self.get_hot_scheme,
+            "深度遗漏": self.get_cold_scheme,
+            "形态平衡": self.get_balance_scheme,
+            "综合智能": self.get_smart_scheme,
+        }
 
-        digit_scores = {}
-        for d in range(10):
-            score = 0.0
-            reasons = []
-
-            miss_val = missing.get(d, 0)
-            total = self.total
-            avg_miss = total / 10.0
-            if miss_val > avg_miss * 2:
-                score += 3.0
-                reasons.append(f"{d}遗漏{miss_val}期(超2倍均值)")
-            elif miss_val > avg_miss:
-                score += 1.5
-                reasons.append(f"{d}遗漏{miss_val}期")
-
-            for window in [10, 30, 50]:
-                freq = hotness[window].get(d, 0)
-                expected = window * 3 / 10.0
-                if freq < expected * 0.5:
-                    score += 1.0
-                    reasons.append(f"近{window}期仅{freq}次")
-
-            for rec in recoveries:
-                pname = rec["pattern"]
-                if "全大" in pname and d >= 5:
-                    score += 2.0
-                    reasons.append(f"全大回补利好{d}")
-                elif "全小" in pname and d < 5:
-                    score += 2.0
-                    reasons.append(f"全小回补利好{d}")
-                elif "全偶" in pname and d % 2 == 0:
-                    score += 2.0
-                    reasons.append(f"全偶回补利好{d}")
-                elif "全奇" in pname and d % 2 == 1:
-                    score += 2.0
-                    reasons.append(f"全奇回补利好{d}")
-                elif f"和值{d % 3}路" in pname:
-                    score += 1.5
-                    reasons.append(f"和值{d % 3}路回补利好{d}")
-
-            for s in streaks:
-                feat = s["feature"]
-                opp = s["opposite"]
-                if feat == "和尾大小" and opp:
-                    if opp == "小" and d < 5:
-                        score += 2.0
-                        reasons.append(f"和尾小反转利好{d}")
-                    elif opp == "大" and d >= 5:
-                        score += 2.0
-                        reasons.append(f"和尾大反转利好{d}")
-                elif feat == "和值奇偶" and opp:
-                    if opp == "偶" and d % 2 == 0:
-                        score += 1.5
-                        reasons.append(f"偶数反转利好{d}")
-                    elif opp == "奇" and d % 2 == 1:
-                        score += 1.5
-                        reasons.append(f"奇数反转利好{d}")
-                elif feat in ("百位012路", "十位012路", "个位012路") and opp:
-                    if isinstance(opp, list) and d % 3 in opp:
-                        score += 1.0
-                        reasons.append(f"{feat}反转利好{d}路")
-
-            digit_scores[d] = {"score": score, "reasons": reasons}
-
-        ranked = sorted(digit_scores.items(), key=lambda x: -x[1]["score"])
-        all_digits = [d for d, _ in ranked]
+        scheme_fn = strategy_map.get(strategy, self.get_smart_scheme)
+        base_scheme = scheme_fn(self.df, n_codes=7)
 
         schemes = []
-        rotation_steps = [0, 3, 6]
-        for i, step in enumerate(rotation_steps[:n_schemes]):
-            selected = []
-            for j in range(10):
-                idx = (step + j) % 10
-                d = all_digits[idx]
-                if d not in selected:
-                    selected.append(d)
-                if len(selected) == 7:
-                    break
-            if len(selected) < 7:
-                for d in all_digits:
-                    if d not in selected:
-                        selected.append(d)
-                    if len(selected) == 7:
+        for i in range(n_schemes):
+            if i == 0:
+                digits = list(base_scheme["digits"])
+                reasons = [
+                    f"当前策略：{base_scheme['strategy_name']}",
+                    f"核心逻辑：{base_scheme['core_logic']}",
+                ]
+                detail = base_scheme["detail"]
+            else:
+                rotation_offset = i * 2
+                all_ranked = self._get_full_ranked(strategy)
+                start_idx = rotation_offset % len(all_ranked)
+                digits = []
+                for j in range(10):
+                    idx = (start_idx + j) % 10
+                    d = all_ranked[idx]
+                    if d not in digits:
+                        digits.append(d)
+                    if len(digits) == 7:
                         break
-            selected = sorted(selected)
+                digits = sorted(digits)
 
-            digit_reasons = []
-            for d in selected:
-                for reason in digit_scores[d]["reasons"][:1]:
-                    if reason not in digit_reasons:
-                        digit_reasons.append(reason)
-
-            context_reasons = []
-            for s in streaks[:2]:
-                if s["opposite"]:
-                    t = f"{s['feature']}连出{s['streak']}期，关注{s['opposite']}"
-                    if t not in context_reasons:
-                        context_reasons.append(t)
-            for r in recoveries[:2]:
-                t = f"{r['pattern']}遗漏{r['current_missing']}期(理论{r['avg_missing']:.1f}期)"
-                if t not in context_reasons:
-                    context_reasons.append(t)
-
-            scheme_reasons = digit_reasons[:2] + context_reasons[:1]
+                scheme_info = self._get_scheme_info_for_digits(digits, strategy)
+                reasons = [
+                    f"当前策略：{scheme_info['strategy_name']}(变体{i+1})",
+                    f"核心逻辑：{scheme_info['core_logic']}",
+                ]
+                detail = scheme_info["detail"]
 
             schemes.append({
                 "index": i + 1,
-                "digits": selected,
-                "reasons": scheme_reasons[:3],
-                "detail": {d: digit_scores[d] for d in selected},
+                "digits": digits,
+                "reasons": reasons,
+                "detail": detail,
             })
 
         return schemes
+
+    def _get_full_ranked(self, strategy):
+        strategy_map = {
+            "热号追踪": self.get_hot_scheme,
+            "深度遗漏": self.get_cold_scheme,
+            "形态平衡": self.get_balance_scheme,
+            "综合智能": self.get_smart_scheme,
+        }
+        scheme_fn = strategy_map.get(strategy, self.get_smart_scheme)
+        base = scheme_fn(self.df, n_codes=10)
+        return list(base["digits"])
+
+    def _get_scheme_info_for_digits(self, digits, strategy):
+        strategy_map = {
+            "热号追踪": self.get_hot_scheme,
+            "深度遗漏": self.get_cold_scheme,
+            "形态平衡": self.get_balance_scheme,
+            "综合智能": self.get_smart_scheme,
+        }
+        scheme_fn = strategy_map.get(strategy, self.get_smart_scheme)
+        full = scheme_fn(self.df, n_codes=10)
+        return {
+            "strategy_name": full["strategy_name"],
+            "core_logic": full["core_logic"],
+            "detail": {d: full["detail"].get(d, "") for d in digits},
+        }
 
 
 def evaluate_user_numbers(input_nums, df_feat):
@@ -1193,17 +1421,29 @@ with tab2:
 with tab3:
     st.subheader("策略配置")
     st.markdown(
-        "输入 3 组 **7码** 数字（0-9，不重复），系统自动生成嵌套的 6码和5码组合。"
+        "选择预测策略后，系统自动计算 3 组 **7码**，并生成嵌套的 6码和5码组合。"
     )
 
-    groups = []
+    strategy_options = ["综合智能", "热号追踪", "深度遗漏", "形态平衡"]
+    selected_strategy = st.selectbox(
+        "选择预测策略",
+        options=strategy_options,
+        index=0,
+        key="strategy_selector",
+    )
 
-    _engine = LotteryPatternEngine(df_feat)
-    _schemes = _engine.generate_schemes(n_schemes=3)
-    default_sevens = [''.join(map(str, s['digits'])) for s in _schemes]
-    scheme_reasons = [s.get('reasons', []) for s in _schemes]
+    strategy_desc = {
+        "综合智能": "融合热度、遗漏、连出、回补等多维特征，综合评分选取最优号码",
+        "热号追踪": "追踪近30期高频出现的热号，顺势而为，惯性出号",
+        "深度遗漏": "锁定遗漏期数超长的号码，博取概率回补机会",
+        "形态平衡": "均衡热度与遗漏，避免极端偏态，追求稳定收益",
+    }
+    st.info(f"💡 {strategy_desc[selected_strategy]}")
 
-    _hotness_map = calc_hotness(df_feat, 30)
+    with st.spinner("🔄 正在计算最优方案..."):
+        _engine = LotteryPatternEngine(df_feat)
+        _schemes = _engine.generate_schemes(n_schemes=3, strategy=selected_strategy)
+        _hotness_map = calc_hotness(df_feat, 30)
 
     def _rank_by_hotness(digits, hotness):
         return sorted(digits, key=lambda d: (-hotness.get(d, 0), d))
@@ -1221,21 +1461,32 @@ with tab3:
                     return sorted(trial, key=lambda d: (-hotness.get(d, 0), d))
         return candidate
 
+    groups = []
     prev_five_keys = []
     prev_six_keys = []
 
     for i in range(3):
+        scheme = _schemes[i]
+        scheme_digits = scheme["digits"]
+        scheme_reasons = scheme.get("reasons", [])
+        scheme_detail = scheme.get("detail", {})
+
+        seven_str = ''.join(map(str, scheme_digits))
+
         with st.container():
+            st.markdown(
+                f'<div style="padding:12px;background:linear-gradient(135deg,#1a1a2e,#0f3460);'
+                f'border-radius:10px;border:1px solid #4dabf7;margin-bottom:8px">',
+                unsafe_allow_html=True,
+            )
             cols = st.columns([2, 2, 2])
             with cols[0]:
                 raw = st.text_input(
                     f"第 {i + 1} 组 · 7码",
-                    value=default_sevens[i],
+                    value=seven_str,
                     key=f"seven_{i}",
                     max_chars=7,
                 )
-                if scheme_reasons[i]:
-                    st.caption(" · ".join(scheme_reasons[i][:3]))
 
             seven_digits = [int(c) for c in raw if c.isdigit()]
             seven_digits = list(dict.fromkeys(seven_digits))[:7]
@@ -1272,6 +1523,8 @@ with tab3:
                     unsafe_allow_html=True,
                 )
 
+            st.markdown("</div>", unsafe_allow_html=True)
+
             group = {}
             if len(seven_digits) == 7:
                 group[7] = seven_digits
@@ -1280,6 +1533,15 @@ with tab3:
             if len(five_digits) == 5:
                 group[5] = five_digits
             groups.append(group)
+
+            with st.expander(f"📋 第 {i + 1} 组 · 推荐理由"):
+                for reason in scheme_reasons:
+                    st.markdown(f"- {reason}")
+                st.divider()
+                st.markdown("**号码明细：**")
+                for d in sorted(seven_digits):
+                    detail_text = scheme_detail.get(d, "")
+                    st.markdown(f"- **{d}**: {detail_text}")
 
             with st.expander(f"📋 第 {i + 1} 组 · 组六组合注数明细"):
                 combo_rows = []
@@ -1314,18 +1576,24 @@ with tab3:
     analyze = st.button("🚀 开始分析", type="primary", use_container_width=True)
 
     if analyze:
-        all_results = []
-        for i, group in enumerate(groups):
-            for n, digits in sorted(group.items(), reverse=True):
-                result = simulate_group(df, digits)
-                if result:
-                    result["group_idx"] = i + 1
-                    all_results.append(result)
-
-        if not all_results:
-            st.warning("请确保每组输入 7 个不重复的数字（0-9）")
-        else:
-            st.subheader("回测结果汇总")
+        with st.status("🔍 正在进行历史回测分析...", expanded=True) as status:
+            st.write("📊 正在计算每组方案的历史表现...")
+            all_results = []
+            for i, group in enumerate(groups):
+                st.write(f"📈 分析第 {i + 1} 组方案...")
+                for n, digits in sorted(group.items(), reverse=True):
+                    result = simulate_group(df, digits)
+                    if result:
+                        result["group_idx"] = i + 1
+                        all_results.append(result)
+            
+            if not all_results:
+                status.update(label="❌ 分析失败", state="error")
+                st.warning("请确保每组输入 7 个不重复的数字（0-9）")
+            else:
+                status.update(label="✅ 分析完成！", state="complete")
+                
+                st.subheader("回测结果汇总")
 
             summary_data = []
             for r in all_results:
@@ -1474,7 +1742,13 @@ with tab4:
 
     st.divider()
     st.subheader("🎯 7码推荐方案")
-    schemes = engine.generate_schemes(n_schemes=3)
+    tab4_strategy = st.selectbox(
+        "选择推荐策略",
+        options=["综合智能", "热号追踪", "深度遗漏", "形态平衡"],
+        index=0,
+        key="tab4_strategy_selector",
+    )
+    schemes = engine.generate_schemes(n_schemes=3, strategy=tab4_strategy)
     scheme_cols = st.columns(3)
     for i, scheme in enumerate(schemes):
         with scheme_cols[i]:
@@ -1482,7 +1756,7 @@ with tab4:
             st.markdown(
                 f'<div style="text-align:center;padding:20px;background:linear-gradient(135deg,#1a1a2e,#0f3460);'
                 f'border-radius:12px;border:1px solid #4dabf7">'
-                f'<div style="color:#4dabf7;font-size:13px;margin-bottom:10px">方案 {scheme["index"]}</div>'
+                f'<div style="color:#4dabf7;font-size:13px;margin-bottom:10px">方案 {scheme["index"]} · {scheme["reasons"][0] if scheme["reasons"] else ""}</div>'
                 f'<div style="font-size:36px;font-weight:bold;color:#fff;letter-spacing:8px">'
                 f'{digits_str}</div></div>',
                 unsafe_allow_html=True,
@@ -1494,8 +1768,8 @@ with tab4:
                     unsafe_allow_html=True,
                 )
             with st.expander("详细依据"):
-                for detail in scheme["detail"]:
-                    st.markdown(f"- {detail}")
+                for d, info in scheme["detail"].items():
+                    st.markdown(f"- **{d}**: {info}")
 
     st.divider()
     recs, warns = expert_decision_engine(df_feat)
